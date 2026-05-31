@@ -84,4 +84,28 @@ public actor AgentConnectionRegistry {
             return AgentSendOutcome(agentName: name, text: text, state: task.status.state)
         }
     }
+
+    /// 指定ワーカーの進行中タスクを A2A `cancelTask` でキャンセルする（best-effort）。
+    ///
+    /// - Returns: キャンセル後のタスク状態。対象タスクが無い／既に終端でキャンセル不能なら `nil`。
+    @discardableResult
+    public func cancel(_ name: String) async -> TaskState? {
+        guard let connection = connections[name], let taskId = connection.taskId else {
+            return nil
+        }
+        do {
+            let task = try await connection.client.cancelTask(taskId)
+            return task.status.state
+        } catch {
+            // taskNotCancelable / not found 等は無視（best-effort）。
+            return nil
+        }
+    }
+
+    /// 全ワーカーの進行中タスクをキャンセルする（best-effort）。
+    public func cancelAll() async {
+        for name in connections.keys {
+            _ = await cancel(name)
+        }
+    }
 }

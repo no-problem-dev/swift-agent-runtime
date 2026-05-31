@@ -25,6 +25,9 @@ public actor AgentSession<Client: AgentCapableClient> where Client.Model: Sendab
     /// ホスト自身の会話履歴（user / assistant のターン）。
     private var history: [LLMMessage] = []
 
+    /// 進行中の run タスク（セッションがライフサイクル所有者として保持し、cancel() で止める）。
+    private var currentRun: Task<String, Error>?
+
     /// 既定の委譲インストラクション（`HostAgent.root_instruction` 相当）。
     public static var defaultInstruction: String {
         """
@@ -62,9 +65,31 @@ public actor AgentSession<Client: AgentCapableClient> where Client.Model: Sendab
 
     /// ユーザー入力を処理し、オーケストレータの最終テキストを返す。履歴を継続する。
     ///
-    /// ループは本メソッドのタスク内で走る（構造化）。呼び出し元がこの `run` を Task で包んで
-    /// キャンセルすれば、委譲先ワーカーまでツリーで伝播する。
+    /// 実行はセッションが保持する `currentRun` タスク内で走る。`cancel()` でこのタスクを
+    /// キャンセルすると、構造化ツリーを通じて委譲先ワーカーまで伝播する。
     public func run(_ userInput: String) async throws -> String {
+        let task = Task { try await self.runInner(userInput) }
+        currentRun = task
+        defer { currentRun = nil }
+        // 呼び出し元タスクのキャンセルを保持タスクへ橋渡しする。これにより
+        // 「外部 Task のキャンセル（構造化）」と「cancel() API」の双方が同じ経路で効く。
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    /// 進行中の run をキャンセルし、委譲中のワーカーも A2A `cancelTask` で停止する。
+    ///
+    /// 二層で止める: (1) `currentRun` のキャンセルが構造化ツリーをワーカーまで伝播し、
+    /// (2) `registry.cancelAll()` が A2A `cancelTask` で各ワーカーのタスクを終端化する。
+    public func cancel() async {
+        currentRun?.cancel()
+        await registry.cancelAll()
+    }
+
+    private func runInner(_ userInput: String) async throws -> String {
         let loop = await makeLoop()
         var finalText = ""
         try await loop.run(messages: history + [.user(userInput)]) { event in
