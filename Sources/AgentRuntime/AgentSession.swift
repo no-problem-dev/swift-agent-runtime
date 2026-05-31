@@ -61,10 +61,13 @@ public actor AgentSession<Client: AgentCapableClient> where Client.Model: Sendab
     }
 
     /// ユーザー入力を処理し、オーケストレータの最終テキストを返す。履歴を継続する。
+    ///
+    /// ループは本メソッドのタスク内で走る（構造化）。呼び出し元がこの `run` を Task で包んで
+    /// キャンセルすれば、委譲先ワーカーまでツリーで伝播する。
     public func run(_ userInput: String) async throws -> String {
         let loop = await makeLoop()
         var finalText = ""
-        for try await event in loop.run(messages: history + [.user(userInput)]) {
+        try await loop.run(messages: history + [.user(userInput)]) { event in
             if case .completed(let text) = event {
                 finalText = text
             }
@@ -75,6 +78,7 @@ public actor AgentSession<Client: AgentCapableClient> where Client.Model: Sendab
     }
 
     /// オーケストレータのループイベントをストリームで返す。完了時に履歴を継続する。
+    /// ストリーム返却の境界としてのみ Task を立て、ループ本体は構造化のまま走らせる。
     public func stream(_ userInput: String) -> AsyncThrowingStream<AgentLoop<Client>.Event, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -82,7 +86,7 @@ public actor AgentSession<Client: AgentCapableClient> where Client.Model: Sendab
                     let loop = await self.makeLoop()
                     let prior = self.history
                     var finalText = ""
-                    for try await event in loop.run(messages: prior + [.user(userInput)]) {
+                    try await loop.run(messages: prior + [.user(userInput)]) { event in
                         if case .completed(let text) = event { finalText = text }
                         continuation.yield(event)
                     }

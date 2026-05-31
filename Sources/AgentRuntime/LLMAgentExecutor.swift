@@ -52,7 +52,9 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         let messages = reconstructMessages(from: context)
 
         do {
-            for try await event in loop.run(messages: messages) {
+            // 構造化: ループは execute のタスク内で走る。execute は DefaultRequestHandler の
+            // producer 子タスクなので、キャンセルはツリーを通じてここまで伝播する。
+            try await loop.run(messages: messages) { event in
                 switch event {
                 case .thinking(let text):
                     if !text.isEmpty {
@@ -64,12 +66,14 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                     break
                 case .inputRequired(let question):
                     try await updater.requiresInput(message: updater.newAgentMessage([.text(question)]))
-                    return
                 case .completed(let text):
                     await updater.addArtifact([.text(text)], name: artifactName)
                     try await updater.complete()
                 }
             }
+        } catch is CancellationError {
+            // キャンセルは正常（DefaultRequestHandler が canceled へ遷移させる）。
+            throw CancellationError()
         } catch {
             try? await updater.failed(message: updater.newAgentMessage([.text("\(error)")]))
         }

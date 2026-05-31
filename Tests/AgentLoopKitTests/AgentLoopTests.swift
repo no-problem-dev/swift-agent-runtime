@@ -26,11 +26,11 @@ private struct ScriptedClient: AgentCapableClient {
 @Suite("AgentLoop (generic, A2A-free)")
 struct AgentLoopTests {
 
-    @Test("ツール無しの応答は即 completed")
+    @Test("ツール無しの応答は即 completed（構造化 run）")
     func completesWithoutTools() async throws {
         let loop = AgentLoop(client: ScriptedClient(askUser: false), model: "mock")
         var final: String?
-        for try await event in loop.run(messages: [.user("hi")]) {
+        try await loop.run(messages: [.user("hi")]) { event in
             if case .completed(let text) = event { final = text }
         }
         #expect(final == "final answer")
@@ -40,11 +40,21 @@ struct AgentLoopTests {
     func emitsInputRequired() async throws {
         let loop = AgentLoop(client: ScriptedClient(askUser: true), model: "mock", tools: ToolSet { RequestUserInputTool() })
         var events: [AgentLoop<ScriptedClient>.Event] = []
-        for try await event in loop.run(messages: [.user("weather please")]) { events.append(event) }
+        try await loop.run(messages: [.user("weather please")]) { events.append($0) }
 
         guard case .inputRequired(let question) = events.last else {
             Issue.record("expected inputRequired, got \(events)"); return
         }
         #expect(question == "Which city?")
+    }
+
+    @Test("events adapter でも同じイベント列が得られる（ストリーム境界）")
+    func eventsAdapter() async throws {
+        let loop = AgentLoop(client: ScriptedClient(askUser: false), model: "mock")
+        var final: String?
+        for try await event in loop.events(messages: [.user("hi")]) {
+            if case .completed(let text) = event { final = text }
+        }
+        #expect(final == "final answer")
     }
 }

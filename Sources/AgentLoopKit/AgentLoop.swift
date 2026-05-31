@@ -8,6 +8,13 @@ import Foundation
 /// swift-llm-agent（LLMAgent / LLMAgentSession）には依存しない。MCP などのツールは
 /// `ToolSet` 経由でそのまま利用できる。
 ///
+/// ## 構造化並行性
+///
+/// 基本 API `run(messages:onEvent:)` は **呼び出し元のタスク内で逐次実行**する（内部 Task を
+/// 立てない）。これにより呼び出し元（ワーカー実行や AgentSession）のタスクツリーの一部となり、
+/// 親タスクのキャンセルが `Task.checkCancellation()` を通じてループに伝播する。
+/// ストリームとして外部へ渡したい場合だけ `events(messages:)` adapter を使う。
+///
 /// `executeAgentStep` を呼び、応答にツール呼び出しが含まれれば `ToolSet` で実行して結果を
 /// 会話に追記し、ツール呼び出しが無くなる（endTurn）まで繰り返す。呼ばれたツールが
 /// `InteractiveRuntimeTool` に準拠していれば、実行せずループを止めて `.inputRequired` を
@@ -48,77 +55,78 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         self.maxSteps = maxSteps
     }
 
-    public func run(messages initial: [LLMMessage]) -> AsyncThrowingStream<Event, Error> {
-        let client = self.client
-        let model = self.model
-        let tools = self.tools
-        let systemPrompt = self.systemPrompt
-        let maxSteps = self.maxSteps
+    /// ループを呼び出し元タスク内で実行し、各イベントを `onEvent` へ渡す（構造化）。
+    public func run(messages initial: [LLMMessage], onEvent: (Event) async throws -> Void) async throws {
+        var messages = initial
+        for _ in 0..<maxSteps {
+            try Task.checkCancellation()
 
-        return AsyncThrowingStream { continuation in
+            let response = try await client.executeAgentStep(
+                messages: messages,
+                model: model,
+                systemPrompt: systemPrompt,
+                tools: tools,
+                toolChoice: tools.isEmpty ? .disabled : .auto,
+                responseSchema: nil,
+                thinkingMode: .disabled,
+                reasoningEffort: nil,
+                maxTokens: nil
+            )
+
+            var toolUses: [(id: String, name: String, input: Data)] = []
+            var text = ""
+            for block in response.content {
+                switch block {
+                case .text(let value): text += value
+                case .toolUse(let id, let name, let input): toolUses.append((id, name, input))
+                default: break
+                }
+            }
+
+            if toolUses.isEmpty {
+                try await onEvent(.completed(text: text))
+                return
+            }
+
+            if !text.isEmpty {
+                try await onEvent(.thinking(text))
+            }
+            messages.append(.toolUses(toolUses.map { (id: $0.id, name: $0.name, input: $0.input) }))
+
+            // 対話ツール（InteractiveRuntimeTool）が呼ばれたら、実行せず中断して入力を要求。
+            if let ask = toolUses.first(where: { tools.tool(named: $0.name) is any InteractiveRuntimeTool }),
+               let interactive = tools.tool(named: ask.name) as? any InteractiveRuntimeTool {
+                try await onEvent(.inputRequired(question: interactive.question(from: ask.input)))
+                return
+            }
+
+            var results: [(toolCallId: String, name: String, content: ToolResultContent)] = []
+            for use in toolUses {
+                try await onEvent(.toolCall(id: use.id, name: use.name))
+                let result: ToolResult
+                do {
+                    result = try await tools.execute(toolNamed: use.name, with: use.input)
+                } catch {
+                    result = .error("\(error)")
+                }
+                let content: ToolResultContent = result.isError
+                    ? .failure(result.stringValue)
+                    : .success(result.stringValue)
+                results.append((toolCallId: use.id, name: use.name, content: content))
+                try await onEvent(.toolResult(name: use.name, output: result.stringValue, isError: result.isError))
+            }
+            messages.append(.toolResults(results))
+        }
+        try await onEvent(.completed(text: ""))
+    }
+
+    /// `run` を外部ストリームとして公開する adapter（ストリーム返却のため内部 Task を立てる）。
+    /// ループ本体は構造化のまま `run` を使い、ここは「ストリーム境界」だけを担う。
+    public func events(messages: [LLMMessage]) -> AsyncThrowingStream<Event, Error> {
+        AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    var messages = initial
-                    for _ in 0..<maxSteps {
-                        let response = try await client.executeAgentStep(
-                            messages: messages,
-                            model: model,
-                            systemPrompt: systemPrompt,
-                            tools: tools,
-                            toolChoice: tools.isEmpty ? .disabled : .auto,
-                            responseSchema: nil,
-                            thinkingMode: .disabled,
-                            reasoningEffort: nil,
-                            maxTokens: nil
-                        )
-
-                        var toolUses: [(id: String, name: String, input: Data)] = []
-                        var text = ""
-                        for block in response.content {
-                            switch block {
-                            case .text(let value): text += value
-                            case .toolUse(let id, let name, let input): toolUses.append((id, name, input))
-                            default: break
-                            }
-                        }
-
-                        if toolUses.isEmpty {
-                            continuation.yield(.completed(text: text))
-                            continuation.finish()
-                            return
-                        }
-
-                        if !text.isEmpty {
-                            continuation.yield(.thinking(text))
-                        }
-                        messages.append(.toolUses(toolUses.map { (id: $0.id, name: $0.name, input: $0.input) }))
-
-                        // 対話ツール（InteractiveRuntimeTool）が呼ばれたら、実行せず中断して入力を要求。
-                        if let ask = toolUses.first(where: { tools.tool(named: $0.name) is any InteractiveRuntimeTool }),
-                           let interactive = tools.tool(named: ask.name) as? any InteractiveRuntimeTool {
-                            continuation.yield(.inputRequired(question: interactive.question(from: ask.input)))
-                            continuation.finish()
-                            return
-                        }
-
-                        var results: [(toolCallId: String, name: String, content: ToolResultContent)] = []
-                        for use in toolUses {
-                            continuation.yield(.toolCall(id: use.id, name: use.name))
-                            let result: ToolResult
-                            do {
-                                result = try await tools.execute(toolNamed: use.name, with: use.input)
-                            } catch {
-                                result = .error("\(error)")
-                            }
-                            let content: ToolResultContent = result.isError
-                                ? .failure(result.stringValue)
-                                : .success(result.stringValue)
-                            results.append((toolCallId: use.id, name: use.name, content: content))
-                            continuation.yield(.toolResult(name: use.name, output: result.stringValue, isError: result.isError))
-                        }
-                        messages.append(.toolResults(results))
-                    }
-                    continuation.yield(.completed(text: ""))
+                    try await run(messages: messages) { continuation.yield($0) }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
