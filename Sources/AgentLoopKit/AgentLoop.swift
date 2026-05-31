@@ -40,19 +40,22 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     private let tools: ToolSet
     private let systemPrompt: SystemPrompt?
     private let maxSteps: Int
+    private let parallelToolExecution: Bool
 
     public init(
         client: Client,
         model: Client.Model,
         tools: ToolSet = ToolSet {},
         systemPrompt: SystemPrompt? = nil,
-        maxSteps: Int = 12
+        maxSteps: Int = 12,
+        parallelToolExecution: Bool = true
     ) {
         self.client = client
         self.model = model
         self.tools = tools
         self.systemPrompt = systemPrompt
         self.maxSteps = maxSteps
+        self.parallelToolExecution = parallelToolExecution
     }
 
     /// ループを呼び出し元タスク内で実行し、各イベントを `onEvent` へ渡す（構造化）。
@@ -100,15 +103,46 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 return
             }
 
-            var results: [(toolCallId: String, name: String, content: ToolResultContent)] = []
+            // ツール呼び出し開始イベント（呼び出し順）。
             for use in toolUses {
                 try await onEvent(.toolCall(id: use.id, name: use.name))
-                let result: ToolResult
-                do {
-                    result = try await tools.execute(toolNamed: use.name, with: use.input)
-                } catch {
-                    result = .error("\(error)")
+            }
+
+            // ツール実行。複数かつ許可時は子タスクで並列実行し、結果を呼び出し順に整列する
+            // （並列委譲: 1 ターンで複数ワーカーへ send_message した場合などに同時実行）。
+            // TaskGroup は run のタスクの子なので、キャンセルはツリーで伝播する。
+            let executed: [ToolResult]
+            if parallelToolExecution, toolUses.count > 1 {
+                let tools = self.tools
+                executed = try await withThrowingTaskGroup(of: (Int, ToolResult).self) { group in
+                    for (index, use) in toolUses.enumerated() {
+                        group.addTask {
+                            do {
+                                return (index, try await tools.execute(toolNamed: use.name, with: use.input))
+                            } catch {
+                                return (index, .error("\(error)"))
+                            }
+                        }
+                    }
+                    var collected: [(Int, ToolResult)] = []
+                    for try await pair in group { collected.append(pair) }
+                    return collected.sorted { $0.0 < $1.0 }.map(\.1)
                 }
+            } else {
+                var sequential: [ToolResult] = []
+                for use in toolUses {
+                    do {
+                        sequential.append(try await tools.execute(toolNamed: use.name, with: use.input))
+                    } catch {
+                        sequential.append(.error("\(error)"))
+                    }
+                }
+                executed = sequential
+            }
+
+            // 結果イベント + toolResults メッセージ（呼び出し順）。
+            var results: [(toolCallId: String, name: String, content: ToolResultContent)] = []
+            for (use, result) in zip(toolUses, executed) {
                 let content: ToolResultContent = result.isError
                     ? .failure(result.stringValue)
                     : .success(result.stringValue)
