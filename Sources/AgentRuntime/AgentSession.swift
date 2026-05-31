@@ -80,13 +80,13 @@ public actor AgentSession<Client: AgentCapableClient> where Client.Model: Sendab
             let task = Task {
                 do {
                     let loop = await self.makeLoop()
-                    let prior = await self.history
+                    let prior = self.history
                     var finalText = ""
                     for try await event in loop.run(messages: prior + [.user(userInput)]) {
                         if case .completed(let text) = event { finalText = text }
                         continuation.yield(event)
                     }
-                    await self.appendTurn(user: userInput, assistant: finalText)
+                    self.appendTurn(user: userInput, assistant: finalText)
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
