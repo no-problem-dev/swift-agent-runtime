@@ -2,36 +2,17 @@ import LLMClient
 import LLMTool
 import Foundation
 
-/// ランタイム自前のツール実行ループ。
+/// swift-llm-client の `executeAgentStep` + `ToolSet` だけで動くツール実行ループ。
 ///
-/// swift-llm-client の `AgentCapableClient.executeAgentStep` と `ToolSet` のみに依存し、
-/// swift-llm-agent（LLMAgent / LLMAgentSession）には依存しない。MCP などのツールは
-/// `ToolSet` 経由でそのまま利用できる。
-///
-/// ## 構造化並行性
-///
-/// 基本 API `run(messages:onEvent:)` は **呼び出し元のタスク内で逐次実行**する（内部 Task を
-/// 立てない）。これにより呼び出し元（ワーカー実行や AgentSession）のタスクツリーの一部となり、
-/// 親タスクのキャンセルが `Task.checkCancellation()` を通じてループに伝播する。
-/// ストリームとして外部へ渡したい場合だけ `events(messages:)` adapter を使う。
-///
-/// `executeAgentStep` を呼び、応答にツール呼び出しが含まれれば `ToolSet` で実行して結果を
-/// 会話に追記し、ツール呼び出しが無くなる（endTurn）まで繰り返す。呼ばれたツールが
-/// `InteractiveRuntimeTool` に準拠していれば、実行せずループを止めて `.inputRequired` を
-/// 発する（A2A input-required へ写像）。
+/// `run(messages:onEvent:)` は内部 Task を立てず呼び出し元のタスクで実行するため、
+/// 親タスクのキャンセルがツリーで伝播する。ストリームが要る場合のみ `events(messages:)` を使う。
 public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model: Sendable {
 
-    /// ループの 1 イベント。
     public enum Event: Sendable {
-        /// ツール呼び出し前の中間テキスト。
         case thinking(String)
-        /// ツール呼び出し開始。
         case toolCall(id: String, name: String)
-        /// ツール実行結果。
         case toolResult(name: String, output: String, isError: Bool)
-        /// ユーザー入力が必要（対話ツールが呼ばれた）。
         case inputRequired(question: String)
-        /// ループ完了。最終テキスト。
         case completed(text: String)
     }
 
@@ -58,7 +39,6 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         self.parallelToolExecution = parallelToolExecution
     }
 
-    /// ループを呼び出し元タスク内で実行し、各イベントを `onEvent` へ渡す（構造化）。
     public func run(messages initial: [LLMMessage], onEvent: (Event) async throws -> Void) async throws {
         var messages = initial
         for _ in 0..<maxSteps {
@@ -96,21 +76,18 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
             }
             messages.append(.toolUses(toolUses.map { (id: $0.id, name: $0.name, input: $0.input) }))
 
-            // 対話ツール（InteractiveRuntimeTool）が呼ばれたら、実行せず中断して入力を要求。
+            // 対話ツールは実行せず中断し、入力要求として返す（A2A input-required へ写像）。
             if let ask = toolUses.first(where: { tools.tool(named: $0.name) is any InteractiveRuntimeTool }),
                let interactive = tools.tool(named: ask.name) as? any InteractiveRuntimeTool {
                 try await onEvent(.inputRequired(question: interactive.question(from: ask.input)))
                 return
             }
 
-            // ツール呼び出し開始イベント（呼び出し順）。
             for use in toolUses {
                 try await onEvent(.toolCall(id: use.id, name: use.name))
             }
 
-            // ツール実行。複数かつ許可時は子タスクで並列実行し、結果を呼び出し順に整列する
-            // （並列委譲: 1 ターンで複数ワーカーへ send_message した場合などに同時実行）。
-            // TaskGroup は run のタスクの子なので、キャンセルはツリーで伝播する。
+            // 複数ツールは子タスクで並列実行し、結果を呼び出し順に整列する。
             let executed: [ToolResult]
             if parallelToolExecution, toolUses.count > 1 {
                 let tools = self.tools
@@ -140,7 +117,6 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 executed = sequential
             }
 
-            // 結果イベント + toolResults メッセージ（呼び出し順）。
             var results: [(toolCallId: String, name: String, content: ToolResultContent)] = []
             for (use, result) in zip(toolUses, executed) {
                 let content: ToolResultContent = result.isError
@@ -154,8 +130,6 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         try await onEvent(.completed(text: ""))
     }
 
-    /// `run` を外部ストリームとして公開する adapter（ストリーム返却のため内部 Task を立てる）。
-    /// ループ本体は構造化のまま `run` を使い、ここは「ストリーム境界」だけを担う。
     public func events(messages: [LLMMessage]) -> AsyncThrowingStream<Event, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {

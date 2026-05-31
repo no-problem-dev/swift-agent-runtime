@@ -2,17 +2,12 @@ import LLMClient
 import LLMTool
 import Foundation
 
-/// 実行時にユーザー入力を要求する「対話ツール」を表すマーカープロトコル。
-///
-/// `AgentLoop` はこのプロトコルに準拠したツールが呼ばれると、`execute(with:)` を呼ばずに
-/// ループを中断し、`question(from:)` の文言で `.inputRequired` を発する。これが A2A の
-/// `TaskState.inputRequired` に写像され、ユーザー回答の再送で同一タスクが resume される。
+/// 呼ばれると `AgentLoop` がループを中断し `.inputRequired` を発する対話ツールのマーカー。
 public protocol InteractiveRuntimeTool: Tool {
-    /// ツール引数からユーザーへの質問文を取り出す。
     func question(from argumentsData: Data) -> String
 }
 
-/// 標準の対話ツール。LLM が続行に追加情報を要するときに呼ぶ（a2a-samples の `require_user_input` 相当）。
+/// 標準の対話ツール（a2a-samples の `require_user_input` 相当）。
 public struct RequestUserInputTool: InteractiveRuntimeTool {
     public init() {}
 
@@ -29,7 +24,6 @@ public struct RequestUserInputTool: InteractiveRuntimeTool {
     }
 
     public func execute(with argumentsData: Data) async throws -> ToolResult {
-        // 通常は AgentLoop が実行前に横取りする。横取りされなかった場合のフォールバック。
         .text(question(from: argumentsData))
     }
 

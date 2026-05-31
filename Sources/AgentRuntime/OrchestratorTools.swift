@@ -3,7 +3,6 @@ import LLMClient
 import LLMTool
 import Foundation
 
-/// オーケストレータが委譲先を列挙するツール（a2a-samples `list_remote_agents` 相当）。
 public struct ListAgentsTool: Tool {
     private let registry: AgentConnectionRegistry
 
@@ -26,7 +25,6 @@ public struct ListAgentsTool: Tool {
     }
 }
 
-/// オーケストレータが指定ワーカーへ委譲するツール（a2a-samples `send_message` 相当）。
 public struct SendMessageTool: Tool {
     private let registry: AgentConnectionRegistry
 
@@ -63,8 +61,6 @@ public struct SendMessageTool: Tool {
         case .canceled, .rejected:
             return .error("Agent \(outcome.agentName) did not complete (\(outcome.state?.rawValue ?? "")): \(outcome.text)")
         case .inputRequired, .authRequired:
-            // ワーカーが続行に追加入力を要求している。オーケストレータはこれをユーザーへ
-            // 問い返し、得た回答を同じ send_message で同ワーカーへ再送する（同一 task に継続）。
             let question = outcome.text.isEmpty ? "(no prompt provided)" : outcome.text
             return .text("Agent \(outcome.agentName) needs more input before it can continue. "
                 + "Ask the user: \(question)")

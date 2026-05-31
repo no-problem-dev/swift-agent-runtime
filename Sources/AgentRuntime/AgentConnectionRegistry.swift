@@ -3,26 +3,22 @@ import A2AServer
 import A2AInProcess
 import Foundation
 
-/// 委譲先エージェントの概要（`list_agents` ツールが返す）。
 public struct AgentDescriptor: Sendable, Codable, Hashable {
     public let name: String
     public let description: String
 }
 
-/// ワーカーへの送信結果。
 public struct AgentSendOutcome: Sendable {
     public let agentName: String
-    /// 応答テキスト（`status.message` + artifacts のテキストパートを連結）。
     public let text: String
-    /// タスク状態。`nil` は Message 応答（タスク無し）。
+    /// `nil` は Message 応答（タスク無し）。
     public let state: TaskState?
 }
 
-/// ワーカーごとの `A2AClient` 接続を保持し、A2A 越しに送信するレジストリ。
+/// ワーカーごとの `A2AClient` 接続を保持し A2A 越しに委譲する（a2a-samples `RemoteAgentConnections` 相当）。
 ///
-/// a2a-samples `RemoteAgentConnections` 相当。in-process でも remote でも `A2AClient` を
-/// 注入できるので、オーケストレータは両者を区別せず同じ API で委譲できる。
-/// ワーカーごとに `taskId` / `contextId` を保持し、マルチターンの会話を継続する。
+/// in-process / remote を問わず `A2AClient` を注入でき、ワーカーごとに `taskId` / `contextId` を
+/// 保持してマルチターンを継続する。
 public actor AgentConnectionRegistry {
     private struct Connection {
         let card: AgentCard
@@ -35,27 +31,21 @@ public actor AgentConnectionRegistry {
 
     public init() {}
 
-    /// 任意の `A2AClient`（in-process / REST / JSON-RPC）でワーカーを登録する。
     public func register(card: AgentCard, client: A2AClient) {
         connections[card.name] = Connection(card: card, client: client)
     }
 
-    /// in-process ワーカーを登録する便宜メソッド。
     public func register(card: AgentCard, handler: any RequestHandler) {
         register(card: card, client: A2AClient.inProcess(handler: handler))
     }
 
-    /// 登録済みワーカーの概要一覧。
     public func descriptors() -> [AgentDescriptor] {
         connections.values
             .map { AgentDescriptor(name: $0.card.name, description: $0.card.description) }
             .sorted { $0.name < $1.name }
     }
 
-    /// 指定ワーカーへメッセージを送り、終端/中断状態の結果を返す。
-    ///
-    /// ワーカーに保存済みの `taskId` / `contextId` を引き継いでマルチターンを継続し、
-    /// 応答からそれらを更新する。
+    /// 保存済みの `taskId` / `contextId` を引き継いで送信し、終端/中断状態の結果を返す。
     public func send(to name: String, text: String) async throws -> AgentSendOutcome {
         guard var connection = connections[name] else {
             throw AgentRuntimeError.unknownAgent(name)
@@ -85,24 +75,15 @@ public actor AgentConnectionRegistry {
         }
     }
 
-    /// 指定ワーカーの進行中タスクを A2A `cancelTask` でキャンセルする（best-effort）。
-    ///
-    /// - Returns: キャンセル後のタスク状態。対象タスクが無い／既に終端でキャンセル不能なら `nil`。
+    /// 進行中タスクを A2A `cancelTask` でキャンセル（best-effort）。対象が無い／終端なら `nil`。
     @discardableResult
     public func cancel(_ name: String) async -> TaskState? {
         guard let connection = connections[name], let taskId = connection.taskId else {
             return nil
         }
-        do {
-            let task = try await connection.client.cancelTask(taskId)
-            return task.status.state
-        } catch {
-            // taskNotCancelable / not found 等は無視（best-effort）。
-            return nil
-        }
+        return try? await connection.client.cancelTask(taskId).status.state
     }
 
-    /// 全ワーカーの進行中タスクをキャンセルする（best-effort）。
     public func cancelAll() async {
         for name in connections.keys {
             _ = await cancel(name)

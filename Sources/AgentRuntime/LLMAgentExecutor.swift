@@ -4,16 +4,7 @@ import A2AServer
 import LLMClient
 import LLMTool
 
-/// ランタイム自前の `AgentLoop` を A2A の `AgentExecutor` として実行するアダプタ（ワーカー）。
-/// a2a-samples の各 `agent_executor.py` に相当。
-///
-/// ループの `AgentLoop.Event` を `TaskUpdater` 経由で A2A イベントへ写像する:
-/// - `.thinking` / `.toolCall` → `TaskState.working`（進捗）
-/// - `.inputRequired`         → `TaskState.inputRequired`（中断、resume 待ち）
-/// - `.completed`             → artifact 追加 + `TaskState.completed`
-///
-/// swift-llm-agent には依存せず、swift-llm-client の `AgentCapableClient` + `ToolSet` のみを使う。
-/// 任意のプロバイダ（OpenAI 等）と MCP ツールをそのまま注入できる。
+/// `AgentLoop` を A2A の `AgentExecutor` として実行するワーカー（a2a-samples の agent_executor 相当）。
 public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where Client.Model: Sendable {
     private let client: Client
     private let model: Client.Model
@@ -49,12 +40,9 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
             systemPrompt: systemPrompt,
             maxSteps: maxSteps
         )
-        let messages = reconstructMessages(from: context)
 
         do {
-            // 構造化: ループは execute のタスク内で走る。execute は DefaultRequestHandler の
-            // producer 子タスクなので、キャンセルはツリーを通じてここまで伝播する。
-            try await loop.run(messages: messages) { event in
+            try await loop.run(messages: reconstructMessages(from: context)) { event in
                 switch event {
                 case .thinking(let text):
                     if !text.isEmpty {
@@ -72,7 +60,6 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                 }
             }
         } catch is CancellationError {
-            // キャンセルは正常（DefaultRequestHandler が canceled へ遷移させる）。
             throw CancellationError()
         } catch {
             try? await updater.failed(message: updater.newAgentMessage([.text("\(error)")]))
@@ -84,8 +71,7 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         try await updater.cancel()
     }
 
-    /// A2A タスク履歴（input-required 時の質問など）を LLM 会話へ復元し、新しいユーザー入力を末尾に足す。
-    /// これにより resume（同一タスクへの再送）でワーカーが文脈を引き継げる。
+    // resume（同一タスクへの再送）で文脈を引き継ぐため、A2A タスク履歴を LLM 会話へ復元する。
     private func reconstructMessages(from context: RequestContext) -> [LLMMessage] {
         var messages: [LLMMessage] = []
         for historical in context.currentTask?.history ?? [] {
