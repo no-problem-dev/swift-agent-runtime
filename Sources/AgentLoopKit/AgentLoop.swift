@@ -39,7 +39,10 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         self.parallelToolExecution = parallelToolExecution
     }
 
-    public func run(messages initial: [LLMMessage], onEvent: (Event) async throws -> Void) async throws {
+    /// ループを実行し、ツール呼び出し・結果・最終 assistant 応答まで含む全トランスクリプトを返す。
+    /// 返り値をそのまま次ターンの履歴に使うと、委譲とその結果が文脈として引き継がれる。
+    @discardableResult
+    public func run(messages initial: [LLMMessage], onEvent: (Event) async throws -> Void) async throws -> [LLMMessage] {
         var messages = initial
         for _ in 0..<maxSteps {
             try Task.checkCancellation()
@@ -68,7 +71,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
 
             if toolUses.isEmpty {
                 try await onEvent(.completed(text: text))
-                return
+                messages.append(.assistant(text))
+                return messages
             }
 
             if !text.isEmpty {
@@ -80,7 +84,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
             if let ask = toolUses.first(where: { tools.tool(named: $0.name) is any InteractiveRuntimeTool }),
                let interactive = tools.tool(named: ask.name) as? any InteractiveRuntimeTool {
                 try await onEvent(.inputRequired(question: interactive.question(from: ask.input)))
-                return
+                return messages
             }
 
             for use in toolUses {
@@ -128,6 +132,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
             messages.append(.toolResults(results))
         }
         try await onEvent(.completed(text: ""))
+        return messages
     }
 
     public func events(messages: [LLMMessage]) -> AsyncThrowingStream<Event, Error> {

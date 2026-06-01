@@ -71,13 +71,13 @@ public actor AgentSession<Client: AgentCapableClient> where Client.Model: Sendab
     private func runInner(_ userInput: String) async throws -> String {
         let loop = await makeLoop()
         var finalText = ""
-        try await loop.run(messages: history + [.user(userInput)]) { event in
+        // 全トランスクリプト（委譲のツール呼び出し・結果含む）を履歴として保持。
+        // → 次ターンで「さっき何を調べた？」等にツール無しで文脈から答えられる。
+        history = try await loop.run(messages: history + [.user(userInput)]) { event in
             if case .completed(let text) = event {
                 finalText = text
             }
         }
-        history.append(.user(userInput))
-        history.append(.assistant(finalText))
         return finalText
     }
 
@@ -87,12 +87,10 @@ public actor AgentSession<Client: AgentCapableClient> where Client.Model: Sendab
                 do {
                     let loop = await self.makeLoop()
                     let prior = self.history
-                    var finalText = ""
-                    try await loop.run(messages: prior + [.user(userInput)]) { event in
-                        if case .completed(let text) = event { finalText = text }
+                    let transcript = try await loop.run(messages: prior + [.user(userInput)]) { event in
                         continuation.yield(event)
                     }
-                    self.appendTurn(user: userInput, assistant: finalText)
+                    self.setHistory(transcript)
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -102,9 +100,8 @@ public actor AgentSession<Client: AgentCapableClient> where Client.Model: Sendab
         }
     }
 
-    private func appendTurn(user: String, assistant: String) {
-        history.append(.user(user))
-        history.append(.assistant(assistant))
+    private func setHistory(_ messages: [LLMMessage]) {
+        history = messages
     }
 
     private func makeLoop() async -> AgentLoop<Client> {
