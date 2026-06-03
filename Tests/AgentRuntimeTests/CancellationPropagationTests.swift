@@ -61,7 +61,7 @@ struct CancellationPropagationTests {
         let workerExecutor = LLMAgentExecutor(client: HangingWorkerClient(flag: flag), model: "mock")
         await registry.register(card: card, handler: DefaultRequestHandler(agentCard: card, executor: workerExecutor))
 
-        let session = AgentSession(client: AlwaysDelegateClient(target: "worker"), model: "mock", registry: registry, maxSteps: 4)
+        let session = HostAgent(client: AlwaysDelegateClient(target: "worker"), model: "mock", registry: registry, maxSteps: 4)
 
         let runTask = Task { try await session.run("do it") }
         // ワーカーが Task.sleep に到達するまで待つ。

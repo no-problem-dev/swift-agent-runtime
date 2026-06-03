@@ -18,6 +18,8 @@ let package = Package(
         .package(path: "../swift-a2a"),
         // LLM プロバイダ抽象・Tool・SystemPrompt（ループは持たない＝ランタイムが自前実装）
         .package(path: "../swift-llm-client"),
+        // A2A メタデータ（StructuredValue）。委譲結果に usage を載せて運ぶために使用
+        .package(url: "https://github.com/no-problem-dev/swift-structured-data.git", from: "1.3.0"),
     ],
     targets: [
         // 汎用エージェントループ層
@@ -38,6 +40,7 @@ let package = Package(
                 .product(name: "A2AInProcess", package: "swift-a2a"),
                 .product(name: "LLMClient", package: "swift-llm-client"),
                 .product(name: "LLMTool", package: "swift-llm-client"),
+                .product(name: "StructuredDataCore", package: "swift-structured-data"),
             ]
         ),
         .testTarget(

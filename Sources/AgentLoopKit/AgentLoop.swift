@@ -14,6 +14,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         case toolResult(name: String, output: String, isError: Bool)
         case inputRequired(question: String)
         case completed(text: String)
+        /// LLM 1 ステップ分のトークン使用量（コスト計測用）。
+        case usage(TokenUsage, model: String)
     }
 
     private let client: Client
@@ -22,6 +24,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     private let systemPrompt: SystemPrompt?
     private let maxSteps: Int
     private let parallelToolExecution: Bool
+    private let maxTokens: Int?
 
     public init(
         client: Client,
@@ -29,7 +32,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         tools: ToolSet = ToolSet {},
         systemPrompt: SystemPrompt? = nil,
         maxSteps: Int = 12,
-        parallelToolExecution: Bool = true
+        parallelToolExecution: Bool = true,
+        maxTokens: Int? = nil
     ) {
         self.client = client
         self.model = model
@@ -37,6 +41,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         self.systemPrompt = systemPrompt
         self.maxSteps = maxSteps
         self.parallelToolExecution = parallelToolExecution
+        self.maxTokens = maxTokens
     }
 
     /// ループを実行し、ツール呼び出し・結果・最終 assistant 応答まで含む全トランスクリプトを返す。
@@ -56,8 +61,10 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 responseSchema: nil,
                 thinkingMode: .disabled,
                 reasoningEffort: nil,
-                maxTokens: nil
+                maxTokens: maxTokens
             )
+
+            try await onEvent(.usage(response.usage, model: response.model))
 
             var toolUses: [(id: String, name: String, input: Data)] = []
             var text = ""

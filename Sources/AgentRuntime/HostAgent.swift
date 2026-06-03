@@ -4,44 +4,41 @@ import LLMClient
 import LLMTool
 import Foundation
 
-/// オーケストレータ（ホスト）のセッション（a2a-samples `HostAgent` 相当）。
+/// オーケストレータ（ホスト）エージェント（a2a-samples `HostAgent` 相当）。
 ///
-/// ホスト自身が `AgentLoop` で動く LLM エージェントで、`list_agents` / `send_message` で
-/// 登録済みワーカーへ委譲する。`run` / `stream` を跨いでホストの会話履歴を保持する。
-public actor AgentSession<Client: AgentCapableClient> where Client.Model: Sendable {
+/// ホスト自身が `AgentLoop` で動く LLM エージェントで、`list_remote_agents` / `send_message` で
+/// 登録済みワーカーへ委譲する。system prompt は `HostInstruction.root`（公式 root_instruction の逐語移植）に
+/// レジストリのロスターと現在エージェントを注入して組み立てる。委譲の reasoning 部分は一切カスタムせず、
+/// アプリ固有の出力フォーマット指示だけを `outputInstruction` として後置する。
+/// `run` / `stream` を跨いでホストの会話履歴を保持する。
+public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable {
     private let client: Client
     private let model: Client.Model
     private let registry: AgentConnectionRegistry
     private let extraTools: ToolSet
-    private let instruction: String
+    /// 出力フォーマット等のアプリ固有指示。delegation 本文の後ろに別セクションとして付く（本文は不変）。
+    private let outputInstruction: String?
     private let maxSteps: Int
+    private let maxTokens: Int?
     private var history: [LLMMessage] = []
     private var currentRun: Task<String, Error>?
-
-    public static var defaultInstruction: String {
-        """
-        You are an expert delegator. Delegate the user's request to the most appropriate \
-        remote agent(s) using the `send_message` tool, then synthesize their responses into \
-        a final answer for the user. Use `list_agents` to discover who is available. \
-        Always mention which agent produced each result, and rely on tools rather than \
-        making up answers.
-        """
-    }
 
     public init(
         client: Client,
         model: Client.Model,
         registry: AgentConnectionRegistry,
+        outputInstruction: String? = nil,
         extraTools: ToolSet = ToolSet {},
-        instruction: String? = nil,
-        maxSteps: Int = 12
+        maxSteps: Int = 12,
+        maxTokens: Int? = nil
     ) {
         self.client = client
         self.model = model
         self.registry = registry
+        self.outputInstruction = outputInstruction
         self.extraTools = extraTools
-        self.instruction = instruction ?? Self.defaultInstruction
         self.maxSteps = maxSteps
+        self.maxTokens = maxTokens
     }
 
     public var messages: [LLMMessage] { history }
@@ -110,21 +107,23 @@ public actor AgentSession<Client: AgentCapableClient> where Client.Model: Sendab
             model: model,
             tools: makeTools(),
             systemPrompt: await makeSystemPrompt(),
-            maxSteps: maxSteps
+            maxSteps: maxSteps,
+            maxTokens: maxTokens
         )
     }
 
     private func makeTools() -> ToolSet {
         extraTools + ToolSet {
-            ListAgentsTool(registry: registry)
+            ListRemoteAgentsTool(registry: registry)
             SendMessageTool(registry: registry)
         }
     }
 
     private func makeSystemPrompt() async -> SystemPrompt {
-        let descriptors = await registry.descriptors()
-        let list = descriptors.map { "- \($0.name): \($0.description)" }.joined(separator: "\n")
-        let text = list.isEmpty ? instruction : "\(instruction)\n\nAvailable agents:\n\(list)"
+        let agents = await registry.rosterJSONLines()
+        let active = await registry.activeAgent
+        let root = HostInstruction.root(agents: agents, activeAgent: active)
+        let text = outputInstruction.map { "\(root)\n\n\($0)" } ?? root
         return SystemPrompt(stringLiteral: text)
     }
 }

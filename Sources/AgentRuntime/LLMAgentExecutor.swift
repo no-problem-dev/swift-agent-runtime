@@ -12,6 +12,7 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
     private let systemPrompt: SystemPrompt?
     private let maxSteps: Int
     private let artifactName: String
+    private let maxTokens: Int?
 
     public init(
         client: Client,
@@ -19,7 +20,8 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         tools: ToolSet = ToolSet {},
         systemPrompt: SystemPrompt? = nil,
         maxSteps: Int = 12,
-        artifactName: String = "response"
+        artifactName: String = "response",
+        maxTokens: Int? = nil
     ) {
         self.client = client
         self.model = model
@@ -27,6 +29,7 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         self.systemPrompt = systemPrompt
         self.maxSteps = maxSteps
         self.artifactName = artifactName
+        self.maxTokens = maxTokens
     }
 
     public func execute(_ context: RequestContext, eventQueue: EventQueue) async throws {
@@ -38,9 +41,12 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
             model: model,
             tools: tools,
             systemPrompt: systemPrompt,
-            maxSteps: maxSteps
+            maxSteps: maxSteps,
+            maxTokens: maxTokens
         )
 
+        // ワーカーが消費したトークンを集約し、完了時に artifact metadata で呼び出し元へ返す。
+        var totalUsage: TokenUsage?
         do {
             try await loop.run(messages: reconstructMessages(from: context)) { event in
                 switch event {
@@ -52,10 +58,12 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                     try await updater.updateStatus(.working, message: updater.newAgentMessage([.text("🔧 \(name)")]))
                 case .toolResult:
                     break
+                case .usage(let usage, _):
+                    totalUsage = totalUsage?.adding(usage) ?? usage
                 case .inputRequired(let question):
                     try await updater.requiresInput(message: updater.newAgentMessage([.text(question)]))
                 case .completed(let text):
-                    await updater.addArtifact([.text(text)], name: artifactName)
+                    await updater.addArtifact([.text(text)], name: artifactName, metadata: totalUsage.flatMap(UsageMetadata.encode))
                     try await updater.complete()
                 }
             }

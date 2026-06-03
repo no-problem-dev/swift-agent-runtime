@@ -72,7 +72,7 @@ struct AgentConnectionRegistryTests {
     @Test("list_agents ツールは JSON で 2 件返す")
     func listAgentsTool() async throws {
         let registry = await makeRegistryWithTwoWorkers()
-        let tool = ListAgentsTool(registry: registry)
+        let tool = ListRemoteAgentsTool(registry: registry)
         let result = try await tool.execute(with: Data("{}".utf8))
 
         guard case .json(let data) = result else { Issue.record("expected json"); return }
@@ -95,9 +95,9 @@ struct AgentConnectionRegistryTests {
     func toolsComposeIntoToolSet() async throws {
         let registry = await makeRegistryWithTwoWorkers()
         let tools = ToolSet {
-            ListAgentsTool(registry: registry)
+            ListRemoteAgentsTool(registry: registry)
             SendMessageTool(registry: registry)
         }
-        #expect(tools.toolNames.sorted() == ["list_agents", "send_message"])
+        #expect(tools.toolNames.sorted() == ["list_remote_agents", "send_message"])
     }
 }

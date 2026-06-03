@@ -75,7 +75,7 @@ struct FollowUpContextTests {
                 executor: LLMAgentExecutor(client: CountingWorkerClient(reply: "SwiftUIは宣言的UIフレームワーク", counter: counter), model: "mock")
             )
         )
-        let session = AgentSession(client: FollowUpClient(), model: "mock", registry: registry)
+        let session = HostAgent(client: FollowUpClient(), model: "mock", registry: registry)
 
         // ターン1: 委譲が起きる
         let first = try await session.run("SwiftUIを調べて")

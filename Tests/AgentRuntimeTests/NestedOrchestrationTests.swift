@@ -66,23 +66,23 @@ struct NestedOrchestrationTests {
             executor: LLMAgentExecutor(client: FixedReplyClient(replyText: "W output"), model: "mock")
         ))
 
-        // 中間オーケストレータ A（W へ委譲）を AgentSessionExecutor で A2A 公開
+        // 中間オーケストレータ A（W へ委譲）を HostAgentExecutor で A2A 公開
         let aCard = makeCard("a")
-        let aExecutor = AgentSessionExecutor {
-            AgentSession(client: DelegatingClient(target: "w"), model: "mock", registry: registryA, maxSteps: 6)
+        let aExecutor = HostAgentExecutor {
+            HostAgent(client: DelegatingClient(target: "w"), model: "mock", registry: registryA, maxSteps: 6)
         }
 
         // 上位オーケストレータ B（A へ委譲）
         let registryB = AgentConnectionRegistry()
         await registryB.register(card: aCard, handler: DefaultRequestHandler(agentCard: aCard, executor: aExecutor))
-        let sessionB = AgentSession(client: DelegatingClient(target: "a"), model: "mock", registry: registryB, maxSteps: 6)
+        let sessionB = HostAgent(client: DelegatingClient(target: "a"), model: "mock", registry: registryB, maxSteps: 6)
 
         let result = try await sessionB.run("do it")
         // B → A → W の二段委譲で "FINAL:" が 2 回付く
         #expect(result == "FINAL: FINAL: W output")
     }
 
-    @Test("AgentSessionExecutor 単体: in-process クライアントから呼ぶと completed + artifact を返す")
+    @Test("HostAgentExecutor 単体: in-process クライアントから呼ぶと completed + artifact を返す")
     func executorReturnsArtifact() async throws {
         let registry = AgentConnectionRegistry()
         let wCard = makeCard("w")
@@ -90,8 +90,8 @@ struct NestedOrchestrationTests {
             agentCard: wCard,
             executor: LLMAgentExecutor(client: FixedReplyClient(replyText: "leaf"), model: "mock")
         ))
-        let executor = AgentSessionExecutor {
-            AgentSession(client: DelegatingClient(target: "w"), model: "mock", registry: registry, maxSteps: 6)
+        let executor = HostAgentExecutor {
+            HostAgent(client: DelegatingClient(target: "w"), model: "mock", registry: registry, maxSteps: 6)
         }
         let client = A2AClient.inProcess(handler: DefaultRequestHandler(agentCard: makeCard("a"), executor: executor))
 

@@ -4,17 +4,17 @@ import A2AServer
 import LLMClient
 import LLMTool
 
-/// `AgentSession`（オーケストレータ）を A2A の `AgentExecutor` として公開するアダプタ。
+/// `HostAgent`（オーケストレータ）を A2A の `AgentExecutor` として公開するアダプタ。
 ///
 /// これにより上位オーケストレータのワーカーとして登録でき、入れ子のオーケストレーションが組める。
 /// A2A の `contextId` ごとにセッションを保持し、会話を分離・継続する。
-public actor AgentSessionExecutor<Client: AgentCapableClient>: AgentExecutor where Client.Model: Sendable {
-    private let makeSession: @Sendable () -> AgentSession<Client>
+public actor HostAgentExecutor<Client: AgentCapableClient>: AgentExecutor where Client.Model: Sendable {
+    private let makeHost: @Sendable () -> HostAgent<Client>
     private let artifactName: String
-    private var sessions: [ContextID: AgentSession<Client>] = [:]
+    private var hosts: [ContextID: HostAgent<Client>] = [:]
 
-    public init(artifactName: String = "response", makeSession: @escaping @Sendable () -> AgentSession<Client>) {
-        self.makeSession = makeSession
+    public init(artifactName: String = "response", makeHost: @escaping @Sendable () -> HostAgent<Client>) {
+        self.makeHost = makeHost
         self.artifactName = artifactName
     }
 
@@ -22,10 +22,10 @@ public actor AgentSessionExecutor<Client: AgentCapableClient>: AgentExecutor whe
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
         try await updater.startWork()
 
-        let session = sessionFor(context.contextId)
+        let host = hostFor(context.contextId)
         var finalText = ""
         do {
-            for try await event in await session.stream(context.getUserInput()) {
+            for try await event in await host.stream(context.getUserInput()) {
                 switch event {
                 case .thinking(let text):
                     if !text.isEmpty {
@@ -35,7 +35,7 @@ public actor AgentSessionExecutor<Client: AgentCapableClient>: AgentExecutor whe
                     try await updater.updateStatus(.working, message: updater.newAgentMessage([.text("→ \(name)")]))
                 case .completed(let text):
                     finalText = text
-                case .toolResult, .inputRequired:
+                case .toolResult, .inputRequired, .usage:
                     break
                 }
             }
@@ -49,15 +49,15 @@ public actor AgentSessionExecutor<Client: AgentCapableClient>: AgentExecutor whe
     }
 
     public func cancel(_ context: RequestContext, eventQueue: EventQueue) async throws {
-        await sessions[context.contextId]?.cancel()
+        await hosts[context.contextId]?.cancel()
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
         try await updater.cancel()
     }
 
-    private func sessionFor(_ contextId: ContextID) -> AgentSession<Client> {
-        if let existing = sessions[contextId] { return existing }
-        let session = makeSession()
-        sessions[contextId] = session
-        return session
+    private func hostFor(_ contextId: ContextID) -> HostAgent<Client> {
+        if let existing = hosts[contextId] { return existing }
+        let host = makeHost()
+        hosts[contextId] = host
+        return host
     }
 }

@@ -56,7 +56,7 @@ private func makeWorkerHandler(name: String, reply: String) -> (AgentCard, Defau
     return (card, DefaultRequestHandler(agentCard: card, executor: executor))
 }
 
-@Suite("AgentSession (orchestrator)")
+@Suite("HostAgent (orchestrator)")
 struct AgentSessionTests {
 
     @Test("ホストがワーカーへ委譲し、ワーカー応答を取り込んだ最終テキストを返す（end-to-end）")
@@ -67,7 +67,7 @@ struct AgentSessionTests {
         await registry.register(card: cardA, handler: handlerA)
         await registry.register(card: cardB, handler: handlerB)
 
-        let session = AgentSession(
+        let session = HostAgent(
             client: DelegatingMockClient(targetAgent: "researcher"),
             model: "mock",
             registry: registry
@@ -88,7 +88,7 @@ struct AgentSessionTests {
         let (card, handler) = makeWorkerHandler(name: "researcher", reply: "data")
         await registry.register(card: card, handler: handler)
 
-        let session = AgentSession(client: DelegatingMockClient(targetAgent: "researcher"), model: "mock", registry: registry)
+        let session = HostAgent(client: DelegatingMockClient(targetAgent: "researcher"), model: "mock", registry: registry)
 
         var sawToolCall = false
         var finalText = ""

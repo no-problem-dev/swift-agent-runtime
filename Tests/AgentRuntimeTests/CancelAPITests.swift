@@ -57,7 +57,7 @@ private func makeCard(_ name: String) -> AgentCard {
     )
 }
 
-@Suite("cancel() API (registry & AgentSession)")
+@Suite("cancel() API (registry & HostAgent)")
 struct CancelAPITests {
 
     @Test("registry.cancel は中断中ワーカーを canceled にする。未登録/未開始は nil")
@@ -99,7 +99,7 @@ struct CancelAPITests {
         let registry = AgentConnectionRegistry()
         await registry.register(card: card, handler: DefaultRequestHandler(agentCard: card, executor: LLMAgentExecutor(client: HangingWorkerClient(flag: flag), model: "mock")))
 
-        let session = AgentSession(client: AlwaysDelegateClient(target: "worker"), model: "mock", registry: registry, maxSteps: 4)
+        let session = HostAgent(client: AlwaysDelegateClient(target: "worker"), model: "mock", registry: registry, maxSteps: 4)
 
         let runTask = Task { try await session.run("do it") }
         try await Task.sleep(for: .milliseconds(100))   // ワーカーが hang するまで待つ

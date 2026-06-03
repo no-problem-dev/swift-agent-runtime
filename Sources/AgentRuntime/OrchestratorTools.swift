@@ -3,16 +3,18 @@ import LLMClient
 import LLMTool
 import Foundation
 
-public struct ListAgentsTool: Tool {
+/// 委譲先リモートエージェントを列挙するツール（a2a-samples `list_remote_agents` 相当）。
+/// root instruction が `list_remote_agents` を名指しするため、ツール名はそれに一致させる。
+public struct ListRemoteAgentsTool: Tool {
     private let registry: AgentConnectionRegistry
 
     public init(registry: AgentConnectionRegistry) {
         self.registry = registry
     }
 
-    public var toolName: String { "list_agents" }
+    public var toolName: String { "list_remote_agents" }
     public var toolDescription: String {
-        "List the available remote agents you can delegate tasks to. Returns each agent's name and description."
+        "List the available remote agents you can use to delegate the task. Returns each agent's name and description."
     }
     public var inputSchema: JSONSchema {
         .object(properties: [:])
@@ -25,6 +27,8 @@ public struct ListAgentsTool: Tool {
     }
 }
 
+/// リモートエージェントへメッセージを送って行動させ、応答を得るツール（a2a-samples `send_message` 相当）。
+/// 引数は公式と同じく `agent_name` / `message`。
 public struct SendMessageTool: Tool {
     private let registry: AgentConnectionRegistry
 
@@ -39,12 +43,13 @@ public struct SendMessageTool: Tool {
 
     public var toolName: String { "send_message" }
     public var toolDescription: String {
-        "Send a message to a remote agent by name to take action, and get its response. Include the agent name from list_agents."
+        "Send a message to a remote agent by name to take action, and get its response. "
+            + "Include the agent name from list_remote_agents."
     }
     public var inputSchema: JSONSchema {
         .object(
             properties: [
-                "agent_name": .string(description: "The name of the agent to delegate the task to."),
+                "agent_name": .string(description: "The name of the agent to send the task to."),
                 "message": .string(description: "The message/instruction to send to the agent."),
             ],
             required: ["agent_name", "message"]
