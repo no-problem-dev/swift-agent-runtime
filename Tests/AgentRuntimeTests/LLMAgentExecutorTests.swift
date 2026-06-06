@@ -21,7 +21,8 @@ private struct MockClient: AgentCapableClient {
         responseSchema: JSONSchema?,
         thinkingMode: ThinkingMode,
         reasoningEffort: ReasoningEffort?,
-        maxTokens: Int?
+        maxTokens: Int?,
+        cachePolicy: PromptCachePolicy
     ) async throws -> LLMResponse {
         LLMResponse(
             content: [.text(replyText)],
@@ -41,11 +42,11 @@ private struct MockClient: AgentCapableClient {
     ) async throws -> GenerationResult<T> { throw MockError.unused }
 
     func planToolCalls(
-        prompt: String, model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?
+        prompt: String, model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy
     ) async throws -> ToolCallResponse { throw MockError.unused }
 
     func planToolCalls(
-        messages: [LLMMessage], model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?
+        messages: [LLMMessage], model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy
     ) async throws -> ToolCallResponse { throw MockError.unused }
 }
 

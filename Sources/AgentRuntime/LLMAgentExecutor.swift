@@ -13,6 +13,7 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
     private let maxSteps: Int
     private let artifactName: String
     private let maxTokens: Int?
+    private let cachePolicy: PromptCachePolicy
 
     public init(
         client: Client,
@@ -21,7 +22,8 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         systemPrompt: SystemPrompt? = nil,
         maxSteps: Int = 12,
         artifactName: String = "response",
-        maxTokens: Int? = nil
+        maxTokens: Int? = nil,
+        cachePolicy: PromptCachePolicy = .implicit
     ) {
         self.client = client
         self.model = model
@@ -30,6 +32,7 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         self.maxSteps = maxSteps
         self.artifactName = artifactName
         self.maxTokens = maxTokens
+        self.cachePolicy = cachePolicy
     }
 
     public func execute(_ context: RequestContext, eventQueue: EventQueue) async throws {
@@ -42,7 +45,8 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
             tools: tools,
             systemPrompt: systemPrompt,
             maxSteps: maxSteps,
-            maxTokens: maxTokens
+            maxTokens: maxTokens,
+            cachePolicy: cachePolicy
         )
 
         // ワーカーが消費したトークンを集約し、完了時に artifact metadata で呼び出し元へ返す。

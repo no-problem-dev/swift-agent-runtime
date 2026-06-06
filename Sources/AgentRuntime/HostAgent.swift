@@ -27,6 +27,8 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
     private let correctivePrompt: (@Sendable (_ issues: [String], _ originalInput: String) -> String)?
     /// 検証失敗時の最大リトライ回数（初回生成は含まない。例: 1 なら計2試行）。
     private let maxValidationRetries: Int
+    /// 安定プレフィックス（system prompt + tools）のキャッシュ方針。ループの全ステップに適用される。
+    private let cachePolicy: PromptCachePolicy
     private var history: [LLMMessage] = []
     private var currentRun: Task<String, Error>?
 
@@ -40,7 +42,8 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         maxTokens: Int? = nil,
         outputValidator: (@Sendable (String) -> [String])? = nil,
         correctivePrompt: (@Sendable (_ issues: [String], _ originalInput: String) -> String)? = nil,
-        maxValidationRetries: Int = 0
+        maxValidationRetries: Int = 0,
+        cachePolicy: PromptCachePolicy = .implicit
     ) {
         self.client = client
         self.model = model
@@ -52,6 +55,7 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         self.outputValidator = outputValidator
         self.correctivePrompt = correctivePrompt
         self.maxValidationRetries = maxValidationRetries
+        self.cachePolicy = cachePolicy
     }
 
     public var messages: [LLMMessage] { history }
@@ -76,6 +80,14 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
     public func cancel() async {
         currentRun?.cancel()
         await registry.cancelAll()
+    }
+
+    /// セッション終了処理。明示キャッシュをサーバー側リソースとして所有するクライアントなら解放する
+    /// （Gemini ではストレージ課金の停止）。それ以外のクライアントでは何もしない。
+    public func close() async {
+        if let releasing = client as? PromptCacheReleasing {
+            await releasing.releasePromptCaches()
+        }
     }
 
     private func runInner(_ userInput: String) async throws -> String {
@@ -154,7 +166,8 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
             tools: makeTools(),
             systemPrompt: await makeSystemPrompt(),
             maxSteps: maxSteps,
-            maxTokens: maxTokens
+            maxTokens: maxTokens,
+            cachePolicy: cachePolicy
         )
     }
 

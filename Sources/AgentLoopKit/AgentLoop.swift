@@ -31,6 +31,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     private let maxSteps: Int
     private let parallelToolExecution: Bool
     private let maxTokens: Int?
+    private let cachePolicy: PromptCachePolicy
 
     public init(
         client: Client,
@@ -39,7 +40,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         systemPrompt: SystemPrompt? = nil,
         maxSteps: Int = 12,
         parallelToolExecution: Bool = true,
-        maxTokens: Int? = nil
+        maxTokens: Int? = nil,
+        cachePolicy: PromptCachePolicy = .implicit
     ) {
         self.client = client
         self.model = model
@@ -48,6 +50,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         self.maxSteps = maxSteps
         self.parallelToolExecution = parallelToolExecution
         self.maxTokens = maxTokens
+        self.cachePolicy = cachePolicy
     }
 
     /// 知識カットオフ対策のグラウンディング行。全エージェント（ホスト・ワーカー問わず）の system prompt
@@ -87,7 +90,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 responseSchema: nil,
                 thinkingMode: .disabled,
                 reasoningEffort: nil,
-                maxTokens: maxTokens
+                maxTokens: maxTokens,
+                cachePolicy: cachePolicy
             )
 
             try await onEvent(.usage(response.usage, model: response.model))
