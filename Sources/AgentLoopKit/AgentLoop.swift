@@ -16,6 +16,10 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         case completed(text: String)
         /// LLM 1 ステップ分のトークン使用量（コスト計測用）。
         case usage(TokenUsage, model: String)
+        /// 直前の `completed` 出力が呼び出し側の検証フックで無効と判定された（prompt→generate→validate
+        /// ループ）。`willRetry` が true なら是正再プロンプトで再生成する。`AgentLoop` 自身は発火せず、
+        /// 検証フックを持つ上位オーケストレータ（`HostAgent`）がストリームへ流す。
+        case validationFailed(issues: [String], willRetry: Bool)
     }
 
     private let client: Client
@@ -44,18 +48,35 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         self.maxTokens = maxTokens
     }
 
+    /// 知識カットオフ対策のグラウンディング行。全エージェント（ホスト・ワーカー問わず）の system prompt
+    /// 先頭に必ず前置される。AgentLoop は全 LLM エージェントの唯一の実行経路なので、ここに置くことで
+    /// 個別の組み立て忘れが起きない。
+    static func todayContext(now: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd (EEEE)"
+        return "Today's date is \(formatter.string(from: now))."
+    }
+
     /// ループを実行し、ツール呼び出し・結果・最終 assistant 応答まで含む全トランスクリプトを返す。
     /// 返り値をそのまま次ターンの履歴に使うと、委譲とその結果が文脈として引き継がれる。
     @discardableResult
     public func run(messages initial: [LLMMessage], onEvent: (Event) async throws -> Void) async throws -> [LLMMessage] {
         var messages = initial
+        // 日付はターン（run）ごとに評価する — 長寿命セッションが日をまたいでも正しい。
+        // コンポーネント先頭への挿入なので render の <context> 入れ子は起きない。
+        let groundedPrompt = SystemPrompt(
+            components: [.context(Self.todayContext())] + (systemPrompt?.components ?? []),
+            metadata: systemPrompt?.metadata
+        )
         for _ in 0..<maxSteps {
             try Task.checkCancellation()
 
             let response = try await client.executeAgentStep(
                 messages: messages,
                 model: model,
-                systemPrompt: systemPrompt,
+                systemPrompt: groundedPrompt,
                 tools: tools,
                 toolChoice: tools.isEmpty ? .disabled : .auto,
                 responseSchema: nil,
@@ -137,6 +158,16 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 try await onEvent(.toolResult(name: use.name, output: result.stringValue, isError: result.isError))
             }
             messages.append(.toolResults(results))
+
+            // ターン終了ツール（ADK skip_summarization 相当）: 成功結果はモデルへ返す追加推論を
+            // 行わずターンを終える。エラー結果は通常どおり次ステップでモデルが自己修正できる。
+            let turnEnded = zip(toolUses, executed).contains { use, result in
+                !result.isError && tools.tool(named: use.name) is any TurnEndingTool
+            }
+            if turnEnded {
+                try await onEvent(.completed(text: text))
+                return messages
+            }
         }
         try await onEvent(.completed(text: ""))
         return messages
