@@ -9,6 +9,8 @@ import Foundation
 public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model: Sendable {
 
     public enum Event: Sendable {
+        /// ターン開始時に組み立てられた最終 system prompt（観測用）。
+        case systemPrompt(rendered: String)
         case thinking(String)
         case toolCall(id: String, name: String)
         case toolResult(name: String, output: String, isError: Bool)
@@ -65,11 +67,14 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     public func run(messages initial: [LLMMessage], onEvent: (Event) async throws -> Void) async throws -> [LLMMessage] {
         var messages = initial
         // 日付はターン（run）ごとに評価する — 長寿命セッションが日をまたいでも正しい。
-        // コンポーネント先頭への挿入なので render の <context> 入れ子は起きない。
+        // ツール同伴指示（A2UI スキーマ等）は末尾へ後置（ADK process_llm_request 相当）。
         let groundedPrompt = SystemPrompt(
-            components: [.context(Self.todayContext())] + (systemPrompt?.components ?? []),
+            components: [.context(Self.todayContext())]
+                + (systemPrompt?.components ?? [])
+                + tools.systemInstructions.map { .context($0) },
             metadata: systemPrompt?.metadata
         )
+        try await onEvent(.systemPrompt(rendered: groundedPrompt.render()))
         for _ in 0..<maxSteps {
             try Task.checkCancellation()
 

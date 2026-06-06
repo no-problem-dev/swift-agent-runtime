@@ -56,7 +56,7 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                     }
                 case .toolCall(_, let name):
                     try await updater.updateStatus(.working, message: updater.newAgentMessage([.text("🔧 \(name)")]))
-                case .toolResult:
+                case .toolResult, .systemPrompt:
                     break
                 case .usage(let usage, _):
                     totalUsage = totalUsage?.adding(usage) ?? usage

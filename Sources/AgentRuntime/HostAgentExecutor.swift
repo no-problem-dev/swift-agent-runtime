@@ -39,7 +39,7 @@ public actor HostAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                     if willRetry {
                         try await updater.updateStatus(.working, message: updater.newAgentMessage([.text("出力を検証中（再生成）… \(issues.count) 件の問題")]))
                     }
-                case .toolResult, .inputRequired, .usage:
+                case .toolResult, .inputRequired, .usage, .systemPrompt:
                     break
                 }
             }
