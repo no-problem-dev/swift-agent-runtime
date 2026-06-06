@@ -65,6 +65,9 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                 case .completed(let text):
                     await updater.addArtifact([.text(text)], name: artifactName, metadata: totalUsage.flatMap(UsageMetadata.encode))
                     try await updater.complete()
+                case .validationFailed:
+                    // ワーカー（単一 AgentLoop）は検証フックを持たないため発火しない（網羅性のための no-op）。
+                    break
                 }
             }
         } catch is CancellationError {

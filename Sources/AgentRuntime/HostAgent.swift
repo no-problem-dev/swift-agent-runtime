@@ -20,6 +20,13 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
     private let outputInstruction: String?
     private let maxSteps: Int
     private let maxTokens: Int?
+    /// 最終出力の検証フック。空配列＝有効、非空＝問題点（人間可読）を返す。`nil` なら検証しない（従来挙動）。
+    /// A2UI 等のドメイン固有検証はここに注入することで、runtime をドメイン非依存に保つ。
+    private let outputValidator: (@Sendable (String) -> [String])?
+    /// 検証失敗時に LLM へ送る是正再プロンプトの組み立て。`(問題点, 元入力) -> 再プロンプト文`。
+    private let correctivePrompt: (@Sendable (_ issues: [String], _ originalInput: String) -> String)?
+    /// 検証失敗時の最大リトライ回数（初回生成は含まない。例: 1 なら計2試行）。
+    private let maxValidationRetries: Int
     private var history: [LLMMessage] = []
     private var currentRun: Task<String, Error>?
 
@@ -30,7 +37,10 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         outputInstruction: String? = nil,
         extraTools: ToolSet = ToolSet {},
         maxSteps: Int = 12,
-        maxTokens: Int? = nil
+        maxTokens: Int? = nil,
+        outputValidator: (@Sendable (String) -> [String])? = nil,
+        correctivePrompt: (@Sendable (_ issues: [String], _ originalInput: String) -> String)? = nil,
+        maxValidationRetries: Int = 0
     ) {
         self.client = client
         self.model = model
@@ -39,6 +49,9 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         self.extraTools = extraTools
         self.maxSteps = maxSteps
         self.maxTokens = maxTokens
+        self.outputValidator = outputValidator
+        self.correctivePrompt = correctivePrompt
+        self.maxValidationRetries = maxValidationRetries
     }
 
     public var messages: [LLMMessage] { history }
@@ -66,28 +79,54 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
     }
 
     private func runInner(_ userInput: String) async throws -> String {
-        let loop = await makeLoop()
-        var finalText = ""
         // 全トランスクリプト（委譲のツール呼び出し・結果含む）を履歴として保持。
         // → 次ターンで「さっき何を調べた？」等にツール無しで文脈から答えられる。
-        history = try await loop.run(messages: history + [.user(userInput)]) { event in
-            if case .completed(let text) = event {
-                finalText = text
+        // 検証フックがあれば、無効出力を是正再プロンプトで再生成する（prompt→generate→validate）。
+        var input = userInput
+        var attempt = 0
+        var finalText = ""
+        while true {
+            let loop = await makeLoop()
+            history = try await loop.run(messages: history + [.user(input)]) { event in
+                if case .completed(let text) = event { finalText = text }
             }
+            guard let validator = outputValidator else { return finalText }
+            let issues = validator(finalText)
+            if issues.isEmpty || attempt >= maxValidationRetries { return finalText }
+            attempt += 1
+            input = (correctivePrompt ?? Self.defaultCorrectivePrompt)(issues, userInput)
         }
-        return finalText
     }
 
     public func stream(_ userInput: String) -> AsyncThrowingStream<AgentLoop<Client>.Event, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let loop = await self.makeLoop()
-                    let prior = self.history
-                    let transcript = try await loop.run(messages: prior + [.user(userInput)]) { event in
-                        continuation.yield(event)
+                    // 検証フックがあれば、各生成後に検証し、無効なら是正再プロンプトを「新しいユーザーターン」
+                    // として送り直して再生成する（会話履歴は保持される）。検証失敗は `.validationFailed` で
+                    // ストリームへ流し、観測側が「再描画 or フォールバック」を判断できるようにする。
+                    var input = userInput
+                    var attempt = 0
+                    while true {
+                        let loop = await self.makeLoop()
+                        let prior = self.history
+                        var finalText = ""
+                        let transcript = try await loop.run(messages: prior + [.user(input)]) { event in
+                            if case .completed(let text) = event { finalText = text }
+                            continuation.yield(event)
+                        }
+                        self.setHistory(transcript)
+
+                        guard let validator = self.outputValidator else { break }
+                        let issues = validator(finalText)
+                        if issues.isEmpty { break }
+                        let willRetry = attempt < self.maxValidationRetries
+                        continuation.yield(.validationFailed(issues: issues, willRetry: willRetry))
+                        if !willRetry { break }
+                        attempt += 1
+                        let builder = self.correctivePrompt ?? Self.defaultCorrectivePrompt
+                        input = builder(issues, userInput)
                     }
-                    self.setHistory(transcript)
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -95,6 +134,13 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// 是正再プロンプトの汎用フォールバック（ドメイン固有のタグ等が要る場合は init で `correctivePrompt` を注入）。
+    private static func defaultCorrectivePrompt(_ issues: [String], _ originalInput: String) -> String {
+        "Your previous response was invalid: \(issues.joined(separator: "; ")). "
+        + "Generate a corrected response that fixes these issues. "
+        + "Original request: \(originalInput)"
     }
 
     private func setHistory(_ messages: [LLMMessage]) {
