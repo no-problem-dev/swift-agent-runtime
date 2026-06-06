@@ -73,6 +73,7 @@ public actor AgentConnectionRegistry {
     /// root instruction の `Agents:` セクションへそのまま差し込む（1 行 1 JSON）。
     public func rosterJSONLines() -> String {
         let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
         return descriptors().compactMap { descriptor in
             (try? encoder.encode(descriptor)).flatMap { String(data: $0, encoding: .utf8) }
         }.joined(separator: "\n")
