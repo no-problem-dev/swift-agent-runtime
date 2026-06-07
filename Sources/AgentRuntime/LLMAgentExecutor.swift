@@ -14,6 +14,9 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
     private let artifactName: String
     private let maxTokens: Int?
     private let cachePolicy: PromptCachePolicy
+    /// ループが実際にレンダリングした system prompt（ツール同伴指示込み）の観測フック。
+    /// 計測（デバッグレコーダ等）向け。nil = 観測しない。
+    private let onSystemPrompt: (@Sendable (String) async -> Void)?
 
     public init(
         client: Client,
@@ -23,7 +26,8 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         maxSteps: Int = 12,
         artifactName: String = "response",
         maxTokens: Int? = nil,
-        cachePolicy: PromptCachePolicy = .implicit
+        cachePolicy: PromptCachePolicy = .implicit,
+        onSystemPrompt: (@Sendable (String) async -> Void)? = nil
     ) {
         self.client = client
         self.model = model
@@ -33,6 +37,7 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         self.artifactName = artifactName
         self.maxTokens = maxTokens
         self.cachePolicy = cachePolicy
+        self.onSystemPrompt = onSystemPrompt
     }
 
     public func execute(_ context: RequestContext, eventQueue: EventQueue) async throws {
@@ -60,7 +65,9 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                     }
                 case .toolCall(_, let name):
                     try await updater.updateStatus(.working, message: updater.newAgentMessage([.text("🔧 \(name)")]))
-                case .toolResult, .systemPrompt:
+                case .systemPrompt(let rendered):
+                    await onSystemPrompt?(rendered)
+                case .toolResult:
                     break
                 case .usage(let usage, _):
                     totalUsage = totalUsage?.adding(usage) ?? usage

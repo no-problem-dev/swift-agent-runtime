@@ -43,13 +43,13 @@ public struct SendMessageTool: Tool {
 
     public var toolName: String { "send_message" }
     public var toolDescription: String {
-        "Send a message to a remote agent by name to take action, and get its response. "
-            + "Include the agent name from list_remote_agents."
+        "Send a message to exactly ONE remote agent by name to take action, and get its response. "
+            + "Include the agent name from list_remote_agents. Call this tool once per agent."
     }
     public var inputSchema: JSONSchema {
         .object(
             properties: [
-                "agent_name": .string(description: "The name of the agent to send the task to."),
+                "agent_name": .string(description: "The name of a single agent to send the task to (never a comma-separated list)."),
                 "message": .string(description: "The message/instruction to send to the agent."),
             ],
             required: ["agent_name", "message"]
