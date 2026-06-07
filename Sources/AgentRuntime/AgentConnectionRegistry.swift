@@ -163,6 +163,108 @@ public actor AgentConnectionRegistry {
         return AgentSendOutcome(agentName: name, text: aggregated, state: finalState, usage: usage)
     }
 
+    /// パーツ保存版の委譲（公式 A2UI orchestrator のパススルー転送相当）。
+    ///
+    /// `send(to:text:)` がテキストへ平坦化・集約するのに対し、こちらは構造化パート
+    /// （A2UI DataPart 等）と message metadata をそのままワーカーへ送り、`StreamResponse` を
+    /// 生で流す。消費側（ルーター）がイベントからパーツを取り出してクライアントへ
+    /// パススルーする。`taskId` / `contextId` / `activeAgent` の管理と observer への
+    /// 進捗通知は `send(to:text:)` と同じ。
+    public func sendStream(
+        to name: String,
+        parts: [Part],
+        metadata: A2AMetadata? = nil
+    ) throws -> AsyncThrowingStream<StreamResponse, Error> {
+        guard let connection = connections[name] else {
+            throw AgentRuntimeError.unknownAgent(name)
+        }
+        lastAgent = name
+        sessionActive = true
+        let delegationId = UUID().uuidString
+        let label = parts.compactMap(\.text).joined().prefix(60)
+
+        let message = Message(
+            messageId: MessageID(UUID().uuidString),
+            role: .user,
+            parts: parts,
+            contextId: connection.contextId,
+            taskId: connection.taskId,
+            metadata: metadata
+        )
+        let client = connection.client
+        let mode = self.mode
+        let observer = self.observer
+
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                await observer?(.started(id: delegationId, agent: name, label: String(label)))
+                var finalState: TaskState?
+                do {
+                    for try await event in client.events(message, mode: mode) {
+                        await observer?(.progress(id: delegationId, agent: name, event))
+                        await self.recordIdentifiers(from: event, for: name)
+                        if let state = Self.taskState(of: event) { finalState = state }
+                        if let usage = Self.usage(of: event) {
+                            await observer?(.usage(id: delegationId, agent: name, usage: usage))
+                        }
+                        continuation.yield(event)
+                    }
+                    await self.finishDelegation(finalState: finalState)
+                    await observer?(.finished(id: delegationId, agent: name, text: "", state: finalState))
+                    continuation.finish()
+                } catch {
+                    await observer?(.failed(id: delegationId, agent: name, error: "\(error)"))
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func recordIdentifiers(from event: StreamResponse, for name: String) {
+        guard var connection = connections[name] else { return }
+        switch event {
+        case .task(let task):
+            connection.taskId = task.id
+            connection.contextId = task.contextId
+        case .statusUpdate(let update):
+            connection.taskId = update.taskId
+        case .artifactUpdate(let update):
+            connection.taskId = update.taskId
+        case .message:
+            break
+        }
+        connections[name] = connection
+    }
+
+    private func finishDelegation(finalState: TaskState?) {
+        // send(to:text:) と同じ: 終端状態（completed/canceled/failed）で非継続。中断（input-required）は継続。
+        if let state = finalState {
+            sessionActive = !state.isTerminal
+        } else {
+            sessionActive = false
+        }
+    }
+
+    private static func taskState(of event: StreamResponse) -> TaskState? {
+        switch event {
+        case .task(let task): task.status.state
+        case .statusUpdate(let update): update.status.state
+        case .artifactUpdate, .message: nil
+        }
+    }
+
+    private static func usage(of event: StreamResponse) -> TokenUsage? {
+        switch event {
+        case .task(let task):
+            task.artifacts.lazy.compactMap { UsageMetadata.decode($0.metadata) }.first
+        case .artifactUpdate(let update):
+            UsageMetadata.decode(update.artifact.metadata)
+        case .statusUpdate, .message:
+            nil
+        }
+    }
+
     /// 進行中タスクを A2A `cancelTask` でキャンセル（best-effort）。対象が無い／終端なら `nil`。
     @discardableResult
     public func cancel(_ name: String) async -> TaskState? {
