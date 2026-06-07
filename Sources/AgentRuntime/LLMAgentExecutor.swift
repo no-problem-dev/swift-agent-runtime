@@ -17,6 +17,9 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
     /// ループが実際にレンダリングした system prompt（ツール同伴指示込み）の観測フック。
     /// 計測（デバッグレコーダ等）向け。nil = 観測しない。
     private let onSystemPrompt: (@Sendable (String) async -> Void)?
+    /// LLM 会話履歴ストア。指定時はネイティブ transcript（tool call/result 込み）で
+    /// マルチターンを継続し、A2A タスク履歴からのテキスト復元を行わない。
+    private let historyStore: (any AgentHistoryStore)?
 
     public init(
         client: Client,
@@ -27,7 +30,8 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         artifactName: String = "response",
         maxTokens: Int? = nil,
         cachePolicy: PromptCachePolicy = .implicit,
-        onSystemPrompt: (@Sendable (String) async -> Void)? = nil
+        onSystemPrompt: (@Sendable (String) async -> Void)? = nil,
+        historyStore: (any AgentHistoryStore)? = nil
     ) {
         self.client = client
         self.model = model
@@ -38,6 +42,7 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         self.maxTokens = maxTokens
         self.cachePolicy = cachePolicy
         self.onSystemPrompt = onSystemPrompt
+        self.historyStore = historyStore
     }
 
     public func execute(_ context: RequestContext, eventQueue: EventQueue) async throws {
@@ -56,8 +61,9 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
 
         // ワーカーが消費したトークンを集約し、完了時に artifact metadata で呼び出し元へ返す。
         var totalUsage: TokenUsage?
+        let messages = await makeMessages(from: context)
         do {
-            try await loop.run(messages: reconstructMessages(from: context)) { event in
+            let transcript = try await loop.run(messages: messages) { event in
                 switch event {
                 case .thinking(let text):
                     if !text.isEmpty {
@@ -81,6 +87,7 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                     break
                 }
             }
+            await historyStore?.save(transcript, for: context.contextId.rawValue)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -91,6 +98,15 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
     public func cancel(_ context: RequestContext, eventQueue: EventQueue) async throws {
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
         try await updater.cancel()
+    }
+
+    /// historyStore があればネイティブ履歴 + 新規入力、なければ A2A タスク履歴からの復元。
+    private func makeMessages(from context: RequestContext) async -> [LLMMessage] {
+        if let historyStore {
+            let history = await historyStore.history(for: context.contextId.rawValue)
+            return history + [.user(context.getUserInput())]
+        }
+        return reconstructMessages(from: context)
     }
 
     // resume（同一タスクへの再送）で文脈を引き継ぐため、A2A タスク履歴を LLM 会話へ復元する。
