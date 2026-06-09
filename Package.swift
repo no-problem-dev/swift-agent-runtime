@@ -15,7 +15,7 @@ let package = Package(
     ],
     dependencies: [
         // A2A プロトコル（client + server + in-process）。エージェント間の契約
-        .package(url: "https://github.com/no-problem-dev/swift-a2a.git", from: "0.6.1"),
+        .package(url: "https://github.com/no-problem-dev/swift-a2a.git", from: "0.6.2"),
         // LLM プロバイダ抽象・Tool・SystemPrompt（ループは持たない＝ランタイムが自前実装）
         .package(url: "https://github.com/no-problem-dev/swift-llm-client.git", from: "3.4.1"),
         // A2A メタデータ（StructuredValue）。委譲結果に usage を載せて運ぶために使用

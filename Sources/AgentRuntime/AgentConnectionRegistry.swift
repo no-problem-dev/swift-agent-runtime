@@ -32,6 +32,17 @@ public struct AgentTaskHandle: Sendable {
     public let immediateText: String
 }
 
+/// 背景委譲の完了をどう受け取るか（A2A 標準の3つの非同期パターン）。
+/// すべて同じ observer イベントを冪等（finished-once）に流すため、消費側はモード非依存。
+public enum BackgroundDelivery: Sendable, Equatable {
+    /// SSE / resubscribe（`subscribeToTask`）。接続中のライブ進捗。
+    case subscribe
+    /// 任意間隔で `tasks/get` を回す。接続を保てない／定期確認向き。
+    case poll(every: Duration)
+    /// `PushNotificationConfig` 登録 → 状態変化でワーカーが能動通知（in-process は Swift イベント）。
+    case push
+}
+
 /// 進行中／完了タスクのスナップショット（`checkTask` / `listRunningTasks` の戻り値）。
 public struct AgentTaskStatus: Sendable {
     public let agentName: String
@@ -59,6 +70,8 @@ public actor AgentConnectionRegistry {
     private var connections: [String: Connection] = [:]
     private let mode: DeliveryMode
     private let observer: DelegationObserver?
+    /// 背景委譲（delegate_async）の既定の完了受け取り方。delegateAsync で個別指定が無ければこれを使う。
+    private let defaultDelivery: BackgroundDelivery
 
     /// 直近に委譲したエージェント（公式 `check_state` の `state['agent']` 相当）。
     private var lastAgent: String?
@@ -69,6 +82,15 @@ public actor AgentConnectionRegistry {
     /// 終端後も保持する（`check_task` で完了後の成果物を取得できるようにするため）。
     /// snapshot は returnImmediately の即時応答を保持し、getTask が永続化に追いつく前の
     /// 取りこぼし（404）を防ぐフォールバックに使う。
+    /// ワーカー handler に渡す in-process push sender（完了イベントを registry の `ingestPush` へ届ける）。
+    /// デモなど client 直接登録の場合も、`makePushSender()` ＋ ワーカーごとの `InMemoryPushNotificationConfigStore`
+    /// を handler に渡せば `.push` 配信が有効になる。
+    public func makePushSender() -> InProcessPushNotificationSender {
+        InProcessPushNotificationSender { [weak self] event, config in
+            await self?.ingestPush(event, config)
+        }
+    }
+
     private struct TrackedTask {
         let agentName: String
         /// この委譲を一意に識別する ID（observer のレーン相関・終端通知用）。
@@ -84,9 +106,10 @@ public actor AgentConnectionRegistry {
     /// root instruction に出す現在エージェント（継続中のみ名前、なければ `"None"`）。
     public var activeAgent: String { sessionActive ? (lastAgent ?? "None") : "None" }
 
-    public init(mode: DeliveryMode = .streaming, observer: DelegationObserver? = nil) {
+    public init(mode: DeliveryMode = .streaming, observer: DelegationObserver? = nil, defaultDelivery: BackgroundDelivery = .subscribe) {
         self.mode = mode
         self.observer = observer
+        self.defaultDelivery = defaultDelivery
     }
 
     public func register(card: AgentCard, client: A2AClient) {
@@ -97,9 +120,15 @@ public actor AgentConnectionRegistry {
         register(card: card, client: A2AClient.inProcess(handler: handler))
     }
 
-    /// in-process ワーカーを `AgentExecutor` から直接登録する糖衣。
+    /// in-process ワーカーを `AgentExecutor` から直接登録する糖衣。ワーカー専用の push config store ＋
+    /// in-process sender を注入するので、`.push` 配信が有効になる。
     public func register(card: AgentCard, executor: any AgentExecutor) {
-        register(card: card, handler: DefaultRequestHandler(agentCard: card, executor: executor))
+        let handler = DefaultRequestHandler(
+            agentCard: card, executor: executor,
+            pushConfigStore: InMemoryPushNotificationConfigStore(),
+            pushSender: makePushSender()
+        )
+        register(card: card, handler: handler)
     }
 
     public func descriptors() -> [AgentDescriptor] {
@@ -311,10 +340,11 @@ public actor AgentConnectionRegistry {
     /// ストリームを終端まで待つ `send(to:text:)` と異なり、ワーカーはサーバ側で実行を継続する。
     /// 呼び出し側（ホスト）は `checkTask` / `listRunningTasks` で後から状況・成果物を確認する。
     /// 毎回新しいタスク（`taskId` 無し）で送るため、同一ワーカーへの並列委譲も独立タスクになる。
-    public func delegateAsync(to name: String, text: String) async throws -> AgentTaskHandle {
+    public func delegateAsync(to name: String, text: String, delivery: BackgroundDelivery? = nil) async throws -> AgentTaskHandle {
         guard var connection = connections[name] else {
             throw AgentRuntimeError.unknownAgent(name)
         }
+        let delivery = delivery ?? defaultDelivery
         let delegationId = UUID().uuidString
         await observer?(.started(id: delegationId, agent: name, label: String(text.prefix(60))))
 
@@ -325,11 +355,13 @@ public actor AgentConnectionRegistry {
             contextId: connection.contextId,
             taskId: nil
         )
+        // .push: タスク生成前にインライン config を載せ、ワーカーが実行前に登録 → 完了で能動通知（取りこぼし無し）。
+        var configuration = SendMessageConfiguration(returnImmediately: true)
+        if case .push = delivery {
+            configuration.taskPushNotificationConfig = TaskPushNotificationConfig(url: "inprocess://delegation", token: delegationId)
+        }
         do {
-            let response = try await connection.client.sendMessage(
-                message,
-                configuration: SendMessageConfiguration(returnImmediately: true)
-            )
+            let response = try await connection.client.sendMessage(message, configuration: configuration)
             switch response {
             case .task(let task):
                 if connection.contextId == nil {
@@ -339,12 +371,22 @@ public actor AgentConnectionRegistry {
                 delegatedTasks[task.id] = TrackedTask(agentName: name, delegationId: delegationId, snapshot: task, finished: false, monitor: nil)
                 lastAgent = name
                 sessionActive = true
-                // 背景監視を起動: LLM の check_task に依存せず、進捗・完了を observer へ流す（真の fire-and-forget）。
-                let monitor = Task { [weak self] in
-                    guard let self else { return }
-                    await self.monitorBackgroundTask(task.id)
+                // 配信方式に応じて完了の受け取り方を決める（すべて同じ observer イベントを冪等に流す）。
+                switch delivery {
+                case .subscribe:
+                    delegatedTasks[task.id]?.monitor = Task { [weak self] in
+                        guard let self else { return }
+                        await self.monitorBackgroundTask(task.id)
+                    }
+                case .poll(let every):
+                    delegatedTasks[task.id]?.monitor = Task { [weak self] in
+                        guard let self else { return }
+                        await self.pollBackgroundTask(task.id, interval: every)
+                    }
+                case .push:
+                    // 能動監視ループは持たない。ワーカーの InProcess push sender が ingestPush へ届ける。
+                    break
                 }
-                delegatedTasks[task.id]?.monitor = monitor
                 return AgentTaskHandle(agentName: name, taskId: task.id, contextId: task.contextId, state: task.status.state, immediateText: "")
             case .message(let agentMessage):
                 await observer?(.finished(id: delegationId, agent: name, text: agentMessage.text, state: nil))
@@ -413,6 +455,54 @@ public actor AgentConnectionRegistry {
             }
         }
         await observer?(.finished(id: tracked.delegationId, agent: tracked.agentName, text: status.text, state: task.status.state))
+    }
+
+    // MARK: - poll 配信（tasks/get を任意間隔で）
+
+    /// 背景委譲タスクを `tasks/get` で interval ごとにポーリングし、進捗・完了を observer へ流す。
+    private func pollBackgroundTask(_ taskId: TaskID, interval: Duration) async {
+        guard let tracked = delegatedTasks[taskId], let connection = connections[tracked.agentName] else { return }
+        let delegationId = tracked.delegationId
+        let agent = tracked.agentName
+        while !Task.isCancelled {
+            do { try await Task.sleep(for: interval) } catch { return } // cancel
+            guard let task = try? await connection.client.getTask(taskId) else { continue }
+            delegatedTasks[taskId]?.snapshot = task
+            await observer?(.progress(id: delegationId, agent: agent, .task(task)))
+            if let usage = Self.usage(of: .task(task)) {
+                await observer?(.usage(id: delegationId, agent: agent, usage: usage))
+            }
+            if task.status.state.isTerminal || task.status.state.isInterrupted {
+                if !(delegatedTasks[taskId]?.finished ?? true) {
+                    delegatedTasks[taskId]?.finished = true
+                    let status = Self.status(of: task, agent: agent)
+                    await observer?(.finished(id: delegationId, agent: agent, text: status.text, state: task.status.state))
+                }
+                return
+            }
+        }
+    }
+
+    // MARK: - push 配信（ワーカーの InProcess sender → ここで受ける）
+
+    /// ワーカーが push した `StreamResponse` を受け、token(delegationId) で委譲を解決して observer へ流す。
+    private func ingestPush(_ event: StreamResponse, _ config: TaskPushNotificationConfig) async {
+        guard let token = config.token,
+              let entry = delegatedTasks.first(where: { $0.value.delegationId == token }) else { return }
+        let taskId = entry.key
+        let tracked = entry.value
+        if case .task(let task) = event { delegatedTasks[taskId]?.snapshot = task }
+        await observer?(.progress(id: tracked.delegationId, agent: tracked.agentName, event))
+        if let usage = Self.usage(of: event) {
+            await observer?(.usage(id: tracked.delegationId, agent: tracked.agentName, usage: usage))
+        }
+        if let state = Self.taskState(of: event), state.isTerminal || state.isInterrupted,
+           !(delegatedTasks[taskId]?.finished ?? true) {
+            delegatedTasks[taskId]?.finished = true
+            let final = (try? await connections[tracked.agentName]?.client.getTask(taskId)) ?? tracked.snapshot
+            let status = Self.status(of: final, agent: tracked.agentName)
+            await observer?(.finished(id: tracked.delegationId, agent: tracked.agentName, text: status.text, state: final.status.state))
+        }
     }
 
     /// 進行中（非終端）の委譲タスク一覧（A2A `tasks/get` で各タスクを refresh）。

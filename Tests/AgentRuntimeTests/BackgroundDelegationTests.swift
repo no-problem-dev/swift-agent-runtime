@@ -193,4 +193,32 @@ struct BackgroundMonitorTests {
         }
         #expect(done)
     }
+
+    @Test("poll 配信: tasks/get の間隔ポーリングで完了が observer に届く", .timeLimit(.minutes(1)))
+    func pollDeliveryNotifies() async throws {
+        let recorder = EventRecorder()
+        let reg = registry(recorder)
+        await reg.register(card: backgroundTestCard("researcher"), executor: BriefWorker())
+        _ = try await reg.delegateAsync(to: "researcher", text: "go", delivery: .poll(every: .milliseconds(20)))
+        var done = false
+        for _ in 0..<400 {
+            if await recorder.sawFinished(state: .completed) { done = true; break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(done)
+    }
+
+    @Test("push 配信: ワーカーが能動 push し、監視ループ無しで完了が observer に届く", .timeLimit(.minutes(1)))
+    func pushDeliveryNotifies() async throws {
+        let recorder = EventRecorder()
+        let reg = registry(recorder)
+        await reg.register(card: backgroundTestCard("researcher"), executor: BriefWorker())
+        _ = try await reg.delegateAsync(to: "researcher", text: "go", delivery: .push)
+        var done = false
+        for _ in 0..<400 {
+            if await recorder.sawFinished(state: .completed) { done = true; break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(done)
+    }
 }
