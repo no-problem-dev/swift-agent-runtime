@@ -34,7 +34,11 @@ struct GatedWorker: AgentExecutor {
         await updater.addArtifact([.text("結果")], name: "result")
         try await updater.complete()
     }
-    func cancel(_ context: RequestContext, eventQueue: EventQueue) async throws {}
+    // 協調的キャンセル: canceled を発行する（A2A の標準的なワーカー挙動）。
+    func cancel(_ context: RequestContext, eventQueue: EventQueue) async throws {
+        let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
+        try await updater.cancel()
+    }
 }
 
 /// startWork → 短い作業 → artifact「結果」→ complete。必ず自走完了する。
@@ -97,6 +101,26 @@ struct BackgroundDelegationTests {
         _ = try await pollUntilTerminal(registry, taskId)
         let after = await registry.listRunningTasks()
         #expect(after.isEmpty)
+    }
+
+    @Test("cancel は背景委譲タスクにも届く", .timeLimit(.minutes(1)))
+    func cancelReachesBackgroundTask() async throws {
+        let gate = TestGate()
+        let registry = AgentConnectionRegistry()
+        await registry.register(card: backgroundTestCard("researcher"), executor: GatedWorker(gate: gate))
+
+        let handle = try await registry.delegateAsync(to: "researcher", text: "調べて")
+        let taskId = try #require(handle.taskId)
+        // 実行中（gate 停止中）。
+        #expect(await registry.listRunningTasks().contains { $0.taskId == taskId })
+
+        // セッション中断相当: cancelAll が背景タスクを終端化する。
+        await registry.cancelAll()
+        await gate.release() // 残った worker は後始末
+
+        let status = try await registry.checkTask(taskId)
+        #expect(status.state.isTerminal) // canceled で終端
+        #expect(await registry.listRunningTasks().isEmpty)
     }
 
     @Test("複数ワーカーへ並列に非ブロッキング委譲できる（独立タスク）", .timeLimit(.minutes(1)))

@@ -400,13 +400,22 @@ public actor AgentConnectionRegistry {
         return AgentTaskStatus(agentName: name, taskId: task.id, state: task.status.state, text: pieces.joined(separator: "\n"), usage: usage)
     }
 
-    /// 進行中タスクを A2A `cancelTask` でキャンセル（best-effort）。対象が無い／終端なら `nil`。
+    /// エージェントの進行中タスクを A2A `cancelTask` でキャンセル（best-effort）。
+    /// 前景（`connection.taskId`）と背景委譲（`delegatedTasks`）の**両方**を止める。
     @discardableResult
     public func cancel(_ name: String) async -> TaskState? {
-        guard let connection = connections[name], let taskId = connection.taskId else {
-            return nil
+        guard let connection = connections[name] else { return nil }
+        var lastState: TaskState?
+        if let taskId = connection.taskId {
+            lastState = try? await connection.client.cancelTask(taskId).status.state
         }
-        return try? await connection.client.cancelTask(taskId).status.state
+        // 同一エージェントの背景タスクを全てキャンセル（並列委譲も取りこぼさない）。
+        for (taskId, tracked) in delegatedTasks where tracked.agentName == name {
+            if let state = try? await connection.client.cancelTask(taskId).status.state {
+                lastState = state
+            }
+        }
+        return lastState
     }
 
     public func cancelAll() async {
