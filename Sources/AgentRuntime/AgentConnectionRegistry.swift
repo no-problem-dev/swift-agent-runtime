@@ -32,15 +32,30 @@ public struct AgentTaskHandle: Sendable {
     public let immediateText: String
 }
 
-/// 背景委譲の完了をどう受け取るか（A2A 標準の3つの非同期パターン）。
-/// すべて同じ observer イベントを冪等（finished-once）に流すため、消費側はモード非依存。
-public enum BackgroundDelivery: Sendable, Equatable {
-    /// SSE / resubscribe（`subscribeToTask`）。接続中のライブ進捗。
-    case subscribe
-    /// 任意間隔で `tasks/get` を回す。接続を保てない／定期確認向き。
-    case poll(every: Duration)
-    /// `PushNotificationConfig` 登録 → 状態変化でワーカーが能動通知（in-process は Swift イベント）。
-    case push
+/// 背景委譲の完了をどう受け取るか。A2A 標準の3方式は排他でなく**層として同時併用**できる
+/// （すべて同じ observer イベントを finished-once で冪等に流すので、何個 ON でも完了は1回）。
+/// - `subscribe`: SSE / resubscribe。背景で走るワーカーをライブで見届ける（進捗の窓）。
+/// - `pollInterval`: `tasks/get` を間隔で。stuck（ハング）検知の安全網。頻繁は無意味なので長め（既定2分）。
+/// - `push`: `PushNotificationConfig` 登録 → 完了でワーカーが能動的に割り込み通知（in-process は Swift イベント）。
+public struct BackgroundDelivery: Sendable, Equatable {
+    public var subscribe: Bool
+    public var push: Bool
+    /// poll する間隔（nil = poll しない）。
+    public var pollInterval: Duration?
+
+    public init(subscribe: Bool = true, push: Bool = true, pollInterval: Duration? = .seconds(120)) {
+        self.subscribe = subscribe
+        self.push = push
+        self.pollInterval = pollInterval
+    }
+
+    /// 3方式すべて（poll は 2 分）。既定。
+    public static let all = BackgroundDelivery()
+    public static let subscribeOnly = BackgroundDelivery(subscribe: true, push: false, pollInterval: nil)
+    public static let pushOnly = BackgroundDelivery(subscribe: false, push: true, pollInterval: nil)
+    public static func pollOnly(every: Duration) -> BackgroundDelivery {
+        BackgroundDelivery(subscribe: false, push: false, pollInterval: every)
+    }
 }
 
 /// 進行中／完了タスクのスナップショット（`checkTask` / `listRunningTasks` の戻り値）。
@@ -98,15 +113,15 @@ public actor AgentConnectionRegistry {
         var snapshot: A2ATask
         /// 終端を観測して finished/最終描画を一度だけ発火したか。
         var finished: Bool
-        /// 背景監視（subscribeToTask）の Task ハンドル。cancel 時に停止する。
-        var monitor: Task<Void, Never>?
+        /// 背景監視（subscribe / poll）の Task ハンドル群。cancel 時に全停止する（push は監視ループ無し）。
+        var monitors: [Task<Void, Never>]
     }
     private var delegatedTasks: [TaskID: TrackedTask] = [:]
 
     /// root instruction に出す現在エージェント（継続中のみ名前、なければ `"None"`）。
     public var activeAgent: String { sessionActive ? (lastAgent ?? "None") : "None" }
 
-    public init(mode: DeliveryMode = .streaming, observer: DelegationObserver? = nil, defaultDelivery: BackgroundDelivery = .subscribe) {
+    public init(mode: DeliveryMode = .streaming, observer: DelegationObserver? = nil, defaultDelivery: BackgroundDelivery = .all) {
         self.mode = mode
         self.observer = observer
         self.defaultDelivery = defaultDelivery
@@ -355,9 +370,9 @@ public actor AgentConnectionRegistry {
             contextId: connection.contextId,
             taskId: nil
         )
-        // .push: タスク生成前にインライン config を載せ、ワーカーが実行前に登録 → 完了で能動通知（取りこぼし無し）。
+        // push: タスク生成前にインライン config を載せ、ワーカーが実行前に登録 → 完了で能動通知（取りこぼし無し）。
         var configuration = SendMessageConfiguration(returnImmediately: true)
-        if case .push = delivery {
+        if delivery.push {
             configuration.taskPushNotificationConfig = TaskPushNotificationConfig(url: "inprocess://delegation", token: delegationId)
         }
         do {
@@ -368,25 +383,25 @@ public actor AgentConnectionRegistry {
                     connection.contextId = task.contextId
                     connections[name] = connection
                 }
-                delegatedTasks[task.id] = TrackedTask(agentName: name, delegationId: delegationId, snapshot: task, finished: false, monitor: nil)
+                delegatedTasks[task.id] = TrackedTask(agentName: name, delegationId: delegationId, snapshot: task, finished: false, monitors: [])
                 lastAgent = name
                 sessionActive = true
-                // 配信方式に応じて完了の受け取り方を決める（すべて同じ observer イベントを冪等に流す）。
-                switch delivery {
-                case .subscribe:
-                    delegatedTasks[task.id]?.monitor = Task { [weak self] in
+                // 有効な方式を**同時に**起動（すべて同じ observer イベントを finished-once で冪等に流す）。
+                var monitors: [Task<Void, Never>] = []
+                if delivery.subscribe {
+                    monitors.append(Task { [weak self] in
                         guard let self else { return }
                         await self.monitorBackgroundTask(task.id)
-                    }
-                case .poll(let every):
-                    delegatedTasks[task.id]?.monitor = Task { [weak self] in
-                        guard let self else { return }
-                        await self.pollBackgroundTask(task.id, interval: every)
-                    }
-                case .push:
-                    // 能動監視ループは持たない。ワーカーの InProcess push sender が ingestPush へ届ける。
-                    break
+                    })
                 }
+                if let interval = delivery.pollInterval {
+                    monitors.append(Task { [weak self] in
+                        guard let self else { return }
+                        await self.pollBackgroundTask(task.id, interval: interval)
+                    })
+                }
+                // push は監視ループ無し（ワーカーの InProcess push sender が ingestPush へ届ける）。
+                delegatedTasks[task.id]?.monitors = monitors
                 return AgentTaskHandle(agentName: name, taskId: task.id, contextId: task.contextId, state: task.status.state, immediateText: "")
             case .message(let agentMessage):
                 await observer?(.finished(id: delegationId, agent: name, text: agentMessage.text, state: nil))
@@ -540,9 +555,9 @@ public actor AgentConnectionRegistry {
         if let taskId = connection.taskId {
             lastState = try? await connection.client.cancelTask(taskId).status.state
         }
-        // 同一エージェントの背景タスクを全てキャンセル（監視も停止、並列委譲も取りこぼさない）。
+        // 同一エージェントの背景タスクを全てキャンセル（監視も全停止、並列委譲も取りこぼさない）。
         for (taskId, tracked) in delegatedTasks where tracked.agentName == name {
-            tracked.monitor?.cancel()
+            tracked.monitors.forEach { $0.cancel() }
             if let state = try? await connection.client.cancelTask(taskId).status.state {
                 lastState = state
             }

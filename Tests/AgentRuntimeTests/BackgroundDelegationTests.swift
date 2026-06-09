@@ -151,6 +151,9 @@ actor EventRecorder {
     func sawFinished(state: TaskState) -> Bool {
         events.contains { if case .finished(_, _, _, let s) = $0 { return s == state }; return false }
     }
+    func finishedCount(state: TaskState) -> Int {
+        events.filter { if case .finished(_, _, _, let s) = $0 { return s == state }; return false }.count
+    }
     var sawProgress: Bool {
         events.contains { if case .progress = $0 { return true }; return false }
     }
@@ -199,7 +202,7 @@ struct BackgroundMonitorTests {
         let recorder = EventRecorder()
         let reg = registry(recorder)
         await reg.register(card: backgroundTestCard("researcher"), executor: BriefWorker())
-        _ = try await reg.delegateAsync(to: "researcher", text: "go", delivery: .poll(every: .milliseconds(20)))
+        _ = try await reg.delegateAsync(to: "researcher", text: "go", delivery: .pollOnly(every: .milliseconds(20)))
         var done = false
         for _ in 0..<400 {
             if await recorder.sawFinished(state: .completed) { done = true; break }
@@ -213,12 +216,27 @@ struct BackgroundMonitorTests {
         let recorder = EventRecorder()
         let reg = registry(recorder)
         await reg.register(card: backgroundTestCard("researcher"), executor: BriefWorker())
-        _ = try await reg.delegateAsync(to: "researcher", text: "go", delivery: .push)
+        _ = try await reg.delegateAsync(to: "researcher", text: "go", delivery: .pushOnly)
         var done = false
         for _ in 0..<400 {
             if await recorder.sawFinished(state: .completed) { done = true; break }
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(done)
+    }
+
+    @Test("3方式すべて同時（.all）でも完了は1回だけ（冪等共存）", .timeLimit(.minutes(1)))
+    func allMechanismsDeliverOnce() async throws {
+        let recorder = EventRecorder()
+        let reg = registry(recorder)
+        await reg.register(card: backgroundTestCard("researcher"), executor: BriefWorker())
+        _ = try await reg.delegateAsync(to: "researcher", text: "go", delivery: .all)
+        for _ in 0..<400 {
+            if await recorder.sawFinished(state: .completed) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        // 追加の完了イベントが来ないことを確認（subscribe + push が同じ完了を二重発火しない）。
+        try await Task.sleep(for: .milliseconds(120))
+        #expect(await recorder.finishedCount(state: .completed) == 1)
     }
 }
