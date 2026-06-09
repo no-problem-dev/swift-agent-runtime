@@ -19,6 +19,29 @@ public struct AgentSendOutcome: Sendable {
     public let usage: TokenUsage?
 }
 
+/// 非ブロッキング委譲（A2A `returnImmediately`）の即時ハンドル。
+/// ワーカーはサーバ側でバックグラウンド実行を継続し、後で `checkTask` / `listRunningTasks` で確認する。
+public struct AgentTaskHandle: Sendable {
+    public let agentName: String
+    /// 生成されたタスク ID。ワーカーが Message を即返した場合（タスク無し）は `nil`。
+    public let taskId: TaskID?
+    public let contextId: ContextID?
+    /// 即時スナップショットの状態（通常 submitted / working）。
+    public let state: TaskState?
+    /// ワーカーが Message を即返した場合の本文（タスクなら空）。
+    public let immediateText: String
+}
+
+/// 進行中／完了タスクのスナップショット（`checkTask` / `listRunningTasks` の戻り値）。
+public struct AgentTaskStatus: Sendable {
+    public let agentName: String
+    public let taskId: TaskID
+    public let state: TaskState
+    /// artifact ＋（終端/中断時の）status メッセージを集約したテキスト。
+    public let text: String
+    public let usage: TokenUsage?
+}
+
 /// ワーカーごとの `A2AClient` 接続を保持し A2A 越しに委譲する（a2a-samples `RemoteAgentConnections` 相当）。
 ///
 /// in-process / remote を問わず `A2AClient` を注入でき、ワーカーごとに `taskId` / `contextId` を
@@ -41,6 +64,13 @@ public actor AgentConnectionRegistry {
     private var lastAgent: String?
     /// 委譲セッションが継続中か（公式 `session_active`）。終端状態で false。
     private var sessionActive = false
+
+    /// 非ブロッキング委譲したタスク（taskId -> 所有ワーカー＋直近スナップショット）。
+    /// 終端後も保持する（`check_task` で完了後の成果物を取得できるようにするため）。
+    /// snapshot は returnImmediately の即時応答を保持し、getTask が永続化に追いつく前の
+    /// 取りこぼし（404）を防ぐフォールバックに使う。
+    private struct TrackedTask { let agentName: String; var snapshot: A2ATask }
+    private var delegatedTasks: [TaskID: TrackedTask] = [:]
 
     /// root instruction に出す現在エージェント（継続中のみ名前、なければ `"None"`）。
     public var activeAgent: String { sessionActive ? (lastAgent ?? "None") : "None" }
@@ -263,6 +293,89 @@ public actor AgentConnectionRegistry {
         case .statusUpdate, .message:
             nil
         }
+    }
+
+    // MARK: - 非ブロッキング委譲（バックグラウンドエージェント）
+
+    /// `returnImmediately` でタスクを生成して即ハンドルを返す（A2A バックグラウンドエージェント）。
+    ///
+    /// ストリームを終端まで待つ `send(to:text:)` と異なり、ワーカーはサーバ側で実行を継続する。
+    /// 呼び出し側（ホスト）は `checkTask` / `listRunningTasks` で後から状況・成果物を確認する。
+    /// 毎回新しいタスク（`taskId` 無し）で送るため、同一ワーカーへの並列委譲も独立タスクになる。
+    public func delegateAsync(to name: String, text: String) async throws -> AgentTaskHandle {
+        guard var connection = connections[name] else {
+            throw AgentRuntimeError.unknownAgent(name)
+        }
+        let delegationId = UUID().uuidString
+        await observer?(.started(id: delegationId, agent: name, label: String(text.prefix(60))))
+
+        let message = Message(
+            messageId: MessageID(UUID().uuidString),
+            role: .user,
+            parts: [.text(text)],
+            contextId: connection.contextId,
+            taskId: nil
+        )
+        do {
+            let response = try await connection.client.sendMessage(
+                message,
+                configuration: SendMessageConfiguration(returnImmediately: true)
+            )
+            switch response {
+            case .task(let task):
+                if connection.contextId == nil {
+                    connection.contextId = task.contextId
+                    connections[name] = connection
+                }
+                delegatedTasks[task.id] = TrackedTask(agentName: name, snapshot: task)
+                lastAgent = name
+                sessionActive = true
+                return AgentTaskHandle(agentName: name, taskId: task.id, contextId: task.contextId, state: task.status.state, immediateText: "")
+            case .message(let agentMessage):
+                await observer?(.finished(id: delegationId, agent: name, text: agentMessage.text, state: nil))
+                return AgentTaskHandle(agentName: name, taskId: nil, contextId: connection.contextId, state: nil, immediateText: agentMessage.text)
+            }
+        } catch {
+            await observer?(.failed(id: delegationId, agent: name, error: "\(error)"))
+            throw error
+        }
+    }
+
+    /// タスクの現在状態と成果物を取得（A2A `tasks/get`）。完了後も取得可能。
+    /// getTask がまだ永続化に追いつかない場合は即時スナップショットへフォールバック。
+    public func checkTask(_ taskId: TaskID) async throws -> AgentTaskStatus {
+        guard let tracked = delegatedTasks[taskId], let connection = connections[tracked.agentName] else {
+            throw AgentRuntimeError.unknownAgent("task \(taskId.rawValue)")
+        }
+        let task = (try? await connection.client.getTask(taskId)) ?? tracked.snapshot
+        delegatedTasks[taskId]?.snapshot = task
+        return Self.status(of: task, agent: tracked.agentName)
+    }
+
+    /// 進行中（非終端）の委譲タスク一覧（A2A `tasks/get` で各タスクを refresh）。
+    /// 終端タスクは一覧から除外するだけで追跡は保持する（後から `checkTask` で結果取得可能）。
+    public func listRunningTasks() async -> [AgentTaskStatus] {
+        var result: [AgentTaskStatus] = []
+        for (taskId, tracked) in delegatedTasks { // 反復中の変異を避けるためキー集合を固定して走査
+            guard let connection = connections[tracked.agentName] else { continue }
+            let task = (try? await connection.client.getTask(taskId)) ?? tracked.snapshot
+            if task.status.state.isTerminal { continue }
+            result.append(Self.status(of: task, agent: tracked.agentName))
+        }
+        return result.sorted { $0.agentName < $1.agentName }
+    }
+
+    private static func status(of task: A2ATask, agent name: String) -> AgentTaskStatus {
+        var pieces: [String] = []
+        let artifactText = task.artifacts.map { $0.parts.compactMap(\.text).joined() }.joined(separator: "\n")
+        if !artifactText.isEmpty { pieces.append(artifactText) }
+        if task.status.state.isTerminal || task.status.state.isInterrupted,
+           let statusMessage = task.status.message {
+            let text = statusMessage.parts.compactMap(\.text).joined()
+            if !text.isEmpty { pieces.append(text) }
+        }
+        let usage = task.artifacts.lazy.compactMap { UsageMetadata.decode($0.metadata) }.first
+        return AgentTaskStatus(agentName: name, taskId: task.id, state: task.status.state, text: pieces.joined(separator: "\n"), usage: usage)
     }
 
     /// 進行中タスクを A2A `cancelTask` でキャンセル（best-effort）。対象が無い／終端なら `nil`。

@@ -78,3 +78,122 @@ public struct SendMessageTool: Tool {
         }
     }
 }
+
+/// リモートエージェントへ**非ブロッキング**で委譲し、完了を待たず即 task_id を返すツール
+/// （A2A `returnImmediately`）。複数エージェントを並列に走らせ、後から `check_task` /
+/// `list_running_tasks` で進捗・成果物を確認するバックグラウンドエージェント運用の起点。
+public struct DelegateAsyncTool: Tool {
+    private let registry: AgentConnectionRegistry
+
+    public init(registry: AgentConnectionRegistry) {
+        self.registry = registry
+    }
+
+    private struct Arguments: Decodable {
+        let agent_name: String
+        let message: String
+    }
+
+    public var toolName: String { "delegate_async" }
+    public var toolDescription: String {
+        "Delegate a task to exactly ONE remote agent and return IMMEDIATELY with a task_id, "
+            + "WITHOUT waiting for it to finish. Use this to start multiple agents working in parallel. "
+            + "Then poll with list_running_tasks and fetch results with check_task once they complete."
+    }
+    public var inputSchema: JSONSchema {
+        .object(
+            properties: [
+                "agent_name": .string(description: "The name of a single agent to delegate to (from list_remote_agents)."),
+                "message": .string(description: "The message/instruction to send to the agent."),
+            ],
+            required: ["agent_name", "message"]
+        )
+    }
+
+    public func execute(with argumentsData: Data) async throws -> ToolResult {
+        let arguments = try JSONDecoder().decode(Arguments.self, from: argumentsData)
+        let handle = try await registry.delegateAsync(to: arguments.agent_name, text: arguments.message)
+        guard let taskId = handle.taskId else {
+            // ワーカーがタスクを作らず Message を即返した（同期完了）。
+            return .text(handle.immediateText.isEmpty
+                ? "Agent \(handle.agentName) responded immediately with no text."
+                : handle.immediateText)
+        }
+        let state = handle.state?.rawValue ?? "submitted"
+        return .text("Started agent \(handle.agentName) in the background. "
+            + "task_id=\(taskId.rawValue), state=\(state). "
+            + "It keeps running; use check_task with this task_id to get its result, or list_running_tasks to see all in-flight tasks.")
+    }
+}
+
+/// 委譲済みタスクの現在状態と成果物を `task_id` で取得するツール（A2A `tasks/get`）。
+public struct CheckTaskTool: Tool {
+    private let registry: AgentConnectionRegistry
+
+    public init(registry: AgentConnectionRegistry) {
+        self.registry = registry
+    }
+
+    private struct Arguments: Decodable { let task_id: String }
+
+    public var toolName: String { "check_task" }
+    public var toolDescription: String {
+        "Get the current status and any produced result of a previously delegated task by its task_id "
+            + "(from delegate_async). Returns the result text when the task has completed."
+    }
+    public var inputSchema: JSONSchema {
+        .object(
+            properties: ["task_id": .string(description: "The task_id returned by delegate_async.")],
+            required: ["task_id"]
+        )
+    }
+
+    public func execute(with argumentsData: Data) async throws -> ToolResult {
+        let arguments = try JSONDecoder().decode(Arguments.self, from: argumentsData)
+        let status = try await registry.checkTask(TaskID(arguments.task_id))
+        switch status.state {
+        case .failed:
+            return .error("Task \(status.taskId.rawValue) (\(status.agentName)) failed: \(status.text)")
+        case .canceled, .rejected:
+            return .error("Task \(status.taskId.rawValue) (\(status.agentName)) did not complete (\(status.state.rawValue)): \(status.text)")
+        case .inputRequired, .authRequired:
+            let question = status.text.isEmpty ? "(no prompt provided)" : status.text
+            return .text("Agent \(status.agentName) needs more input before it can continue. Ask the user: \(question)")
+        case .completed:
+            return .text(status.text.isEmpty ? "Agent \(status.agentName) completed with no text." : status.text)
+        default:
+            return .text("Task \(status.taskId.rawValue) (\(status.agentName)) is still \(status.state.rawValue). Check again later.")
+        }
+    }
+}
+
+/// 進行中（未完了）の委譲タスクを列挙するツール（A2A `tasks/get` で各タスクを refresh）。
+public struct ListRunningTasksTool: Tool {
+    private let registry: AgentConnectionRegistry
+
+    public init(registry: AgentConnectionRegistry) {
+        self.registry = registry
+    }
+
+    private struct RunningTask: Encodable {
+        let agent_name: String
+        let task_id: String
+        let state: String
+    }
+
+    public var toolName: String { "list_running_tasks" }
+    public var toolDescription: String {
+        "List all delegated tasks that are still running (not yet completed). "
+            + "Each entry has agent_name, task_id and state. Use check_task to fetch a completed task's result."
+    }
+    public var inputSchema: JSONSchema {
+        .object(properties: [:])
+    }
+
+    public func execute(with argumentsData: Data) async throws -> ToolResult {
+        let running = await registry.listRunningTasks()
+        let payload = running.map { RunningTask(agent_name: $0.agentName, task_id: $0.taskId.rawValue, state: $0.state.rawValue) }
+        let data = try JSONEncoder().encode(payload)
+        return .json(data)
+    }
+}
