@@ -175,6 +175,9 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         extraTools + ToolSet {
             ListRemoteAgentsTool(registry: registry)
             SendMessageTool(registry: registry)
+            DelegateAsyncTool(registry: registry)
+            CheckTaskTool(registry: registry)
+            ListRunningTasksTool(registry: registry)
         }
     }
 

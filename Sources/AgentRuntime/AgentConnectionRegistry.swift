@@ -69,7 +69,14 @@ public actor AgentConnectionRegistry {
     /// 終端後も保持する（`check_task` で完了後の成果物を取得できるようにするため）。
     /// snapshot は returnImmediately の即時応答を保持し、getTask が永続化に追いつく前の
     /// 取りこぼし（404）を防ぐフォールバックに使う。
-    private struct TrackedTask { let agentName: String; var snapshot: A2ATask }
+    private struct TrackedTask {
+        let agentName: String
+        /// この委譲を一意に識別する ID（observer のレーン相関・終端通知用）。
+        let delegationId: String
+        var snapshot: A2ATask
+        /// 終端を観測して finished/最終描画を一度だけ発火したか。
+        var finished: Bool
+    }
     private var delegatedTasks: [TaskID: TrackedTask] = [:]
 
     /// root instruction に出す現在エージェント（継続中のみ名前、なければ `"None"`）。
@@ -327,7 +334,7 @@ public actor AgentConnectionRegistry {
                     connection.contextId = task.contextId
                     connections[name] = connection
                 }
-                delegatedTasks[task.id] = TrackedTask(agentName: name, snapshot: task)
+                delegatedTasks[task.id] = TrackedTask(agentName: name, delegationId: delegationId, snapshot: task, finished: false)
                 lastAgent = name
                 sessionActive = true
                 return AgentTaskHandle(agentName: name, taskId: task.id, contextId: task.contextId, state: task.status.state, immediateText: "")
@@ -343,13 +350,28 @@ public actor AgentConnectionRegistry {
 
     /// タスクの現在状態と成果物を取得（A2A `tasks/get`）。完了後も取得可能。
     /// getTask がまだ永続化に追いつかない場合は即時スナップショットへフォールバック。
+    ///
+    /// 終端（または中断）を初めて観測した時に observer へ最終 `.task` を流す。これにより
+    /// 背景委譲したワーカーの成果物（A2UI/Slides 等のパート）が、ストリーミング委譲と
+    /// **同一の side-channel 経路**で一度だけ描画される。
     public func checkTask(_ taskId: TaskID) async throws -> AgentTaskStatus {
         guard let tracked = delegatedTasks[taskId], let connection = connections[tracked.agentName] else {
             throw AgentRuntimeError.unknownAgent("task \(taskId.rawValue)")
         }
         let task = (try? await connection.client.getTask(taskId)) ?? tracked.snapshot
         delegatedTasks[taskId]?.snapshot = task
-        return Self.status(of: task, agent: tracked.agentName)
+
+        let status = Self.status(of: task, agent: tracked.agentName)
+        let isDone = task.status.state.isTerminal || task.status.state.isInterrupted
+        if isDone, !tracked.finished {
+            delegatedTasks[taskId]?.finished = true
+            await observer?(.progress(id: tracked.delegationId, agent: tracked.agentName, .task(task)))
+            if let usage = status.usage {
+                await observer?(.usage(id: tracked.delegationId, agent: tracked.agentName, usage: usage))
+            }
+            await observer?(.finished(id: tracked.delegationId, agent: tracked.agentName, text: status.text, state: task.status.state))
+        }
+        return status
     }
 
     /// 進行中（非終端）の委譲タスク一覧（A2A `tasks/get` で各タスクを refresh）。

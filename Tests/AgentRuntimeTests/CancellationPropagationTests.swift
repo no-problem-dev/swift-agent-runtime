@@ -4,10 +4,12 @@ import Testing
 
 private enum MockError: Error { case unused }
 
-/// ワーカーがキャンセルされたら記録するフラグ。
+/// ワーカーの実行開始とキャンセルを記録するフラグ。
 private actor CancelFlag {
     private(set) var cancelled = false
+    private(set) var started = false
     func mark() { cancelled = true }
+    func markStarted() { started = true }
 }
 
 /// executeAgentStep でキャンセルされるまで停止するワーカー用クライアント。
@@ -17,6 +19,7 @@ private struct HangingWorkerClient: AgentCapableClient {
     let flag: CancelFlag
 
     func executeAgentStep(messages: [LLMMessage], model: String, systemPrompt: SystemPrompt?, tools: ToolSet, toolChoice: ToolChoice?, responseSchema: JSONSchema?, thinkingMode: ThinkingMode, reasoningEffort: ReasoningEffort?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> LLMResponse {
+        await flag.markStarted()
         do {
             try await Task.sleep(for: .seconds(5))
         } catch {
@@ -64,8 +67,11 @@ struct CancellationPropagationTests {
         let session = HostAgent(client: AlwaysDelegateClient(target: "worker"), model: "mock", registry: registry, maxSteps: 4)
 
         let runTask = Task { try await session.run("do it") }
-        // ワーカーが Task.sleep に到達するまで待つ。
-        try await Task.sleep(for: .milliseconds(100))
+        // ワーカーが実際にハング地点（Task.sleep）へ到達するまで決定論的に待つ。
+        for _ in 0..<400 where await !flag.started {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await flag.started)
         runTask.cancel()
 
         // run はキャンセルで終わる。
