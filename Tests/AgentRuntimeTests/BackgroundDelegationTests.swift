@@ -143,3 +143,54 @@ struct BackgroundDelegationTests {
 }
 
 enum MockBGError: Error { case timedOut }
+
+/// observer に流れた DelegationEvent を記録する計器。
+actor EventRecorder {
+    private(set) var events: [DelegationEvent] = []
+    func record(_ event: DelegationEvent) { events.append(event) }
+    func sawFinished(state: TaskState) -> Bool {
+        events.contains { if case .finished(_, _, _, let s) = $0 { return s == state }; return false }
+    }
+    var sawProgress: Bool {
+        events.contains { if case .progress = $0 { return true }; return false }
+    }
+}
+
+@Suite("Background monitor (subscribeToTask → observer, check_task 非依存)")
+struct BackgroundMonitorTests {
+
+    private func registry(_ recorder: EventRecorder) -> AgentConnectionRegistry {
+        AgentConnectionRegistry(observer: { await recorder.record($0) })
+    }
+
+    @Test("instant ワーカー: 誰も checkTask を呼ばなくても完了が observer に届く（fallback 経路）", .timeLimit(.minutes(1)))
+    func instantAutoNotifies() async throws {
+        let recorder = EventRecorder()
+        let reg = registry(recorder)
+        await reg.register(card: backgroundTestCard("researcher"), executor: BriefWorker())
+        _ = try await reg.delegateAsync(to: "researcher", text: "go")
+        var done = false
+        for _ in 0..<400 {
+            if await recorder.sawFinished(state: .completed) { done = true; break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(done)
+        #expect(await recorder.sawProgress) // 最終 task を一度描画している
+    }
+
+    @Test("gated ワーカー: 背景監視が subscribe で完了まで追跡し observer に通知する", .timeLimit(.minutes(1)))
+    func streamedAutoNotifies() async throws {
+        let gate = TestGate()
+        let recorder = EventRecorder()
+        let reg = registry(recorder)
+        await reg.register(card: backgroundTestCard("researcher"), executor: GatedWorker(gate: gate))
+        _ = try await reg.delegateAsync(to: "researcher", text: "go")
+        await gate.release()
+        var done = false
+        for _ in 0..<400 {
+            if await recorder.sawFinished(state: .completed) { done = true; break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(done)
+    }
+}

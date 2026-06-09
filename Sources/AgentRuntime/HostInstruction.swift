@@ -22,10 +22,11 @@ public enum HostInstruction {
         Execution:
         - For a single, sequential step, use `send_message` to send a task to ONE agent and wait for its result.
         - To run MULTIPLE agents in parallel, use `delegate_async` to start each one. It returns immediately with a `task_id` without waiting for the agent to finish, so call it once per agent to fan out the work.
+        - You do NOT have to wait for background tasks within this turn. If results aren't needed yet, you may answer the user now (e.g. "I've started researching X; I'll fold in the results when they're ready"). Background tasks keep running and their completion is surfaced automatically.
         - Use `list_running_tasks` to see which delegated tasks are still in progress.
-        - Use `check_task` with a `task_id` to get a delegated task's current status and final result. Poll it until the task completes, then incorporate its result.
+        - Use `check_task` with a `task_id` to get a delegated task's current status and result, on demand.
 
-        Prefer parallel `delegate_async` + `check_task` when independent agents can work at the same time; use `send_message` only for a single sequential delegation.
+        Prefer parallel `delegate_async` when independent agents can work at the same time; use `send_message` only for a single sequential delegation whose result you need immediately.
 
         Be sure to include the remote agent name when you respond to the user.
 

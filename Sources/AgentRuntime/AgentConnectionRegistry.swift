@@ -76,6 +76,8 @@ public actor AgentConnectionRegistry {
         var snapshot: A2ATask
         /// 終端を観測して finished/最終描画を一度だけ発火したか。
         var finished: Bool
+        /// 背景監視（subscribeToTask）の Task ハンドル。cancel 時に停止する。
+        var monitor: Task<Void, Never>?
     }
     private var delegatedTasks: [TaskID: TrackedTask] = [:]
 
@@ -334,9 +336,15 @@ public actor AgentConnectionRegistry {
                     connection.contextId = task.contextId
                     connections[name] = connection
                 }
-                delegatedTasks[task.id] = TrackedTask(agentName: name, delegationId: delegationId, snapshot: task, finished: false)
+                delegatedTasks[task.id] = TrackedTask(agentName: name, delegationId: delegationId, snapshot: task, finished: false, monitor: nil)
                 lastAgent = name
                 sessionActive = true
+                // 背景監視を起動: LLM の check_task に依存せず、進捗・完了を observer へ流す（真の fire-and-forget）。
+                let monitor = Task { [weak self] in
+                    guard let self else { return }
+                    await self.monitorBackgroundTask(task.id)
+                }
+                delegatedTasks[task.id]?.monitor = monitor
                 return AgentTaskHandle(agentName: name, taskId: task.id, contextId: task.contextId, state: task.status.state, immediateText: "")
             case .message(let agentMessage):
                 await observer?(.finished(id: delegationId, agent: name, text: agentMessage.text, state: nil))
@@ -348,30 +356,63 @@ public actor AgentConnectionRegistry {
         }
     }
 
-    /// タスクの現在状態と成果物を取得（A2A `tasks/get`）。完了後も取得可能。
+    /// タスクの現在状態と成果物を取得（A2A `tasks/get`）。完了後も取得可能。LLM の check_task 用の読み取り専用クエリ。
+    /// observer への進捗・完了通知は背景監視（`monitorBackgroundTask`）が担うため、ここでは発火しない。
     /// getTask がまだ永続化に追いつかない場合は即時スナップショットへフォールバック。
-    ///
-    /// 終端（または中断）を初めて観測した時に observer へ最終 `.task` を流す。これにより
-    /// 背景委譲したワーカーの成果物（A2UI/Slides 等のパート）が、ストリーミング委譲と
-    /// **同一の side-channel 経路**で一度だけ描画される。
     public func checkTask(_ taskId: TaskID) async throws -> AgentTaskStatus {
         guard let tracked = delegatedTasks[taskId], let connection = connections[tracked.agentName] else {
             throw AgentRuntimeError.unknownAgent("task \(taskId.rawValue)")
         }
         let task = (try? await connection.client.getTask(taskId)) ?? tracked.snapshot
         delegatedTasks[taskId]?.snapshot = task
+        return Self.status(of: task, agent: tracked.agentName)
+    }
 
+    // MARK: - 背景監視（subscribeToTask → observer）
+
+    /// 背景委譲タスクを A2A `subscribeToTask`（resubscribe）で監視し、進捗・完了を observer へ流す。
+    /// LLM の check_task 呼び出しに依存せず、ホストがターンを終えた後でも完了が UI に届く（fire-and-forget）。
+    /// subscribe が使えない（既に終端=unsupportedOperation / queue 消失=taskNotFound / instant 完了）場合は
+    /// getTask へフォールバックして最終状態を一度流す。
+    private func monitorBackgroundTask(_ taskId: TaskID) async {
+        guard let tracked = delegatedTasks[taskId], let connection = connections[tracked.agentName] else { return }
+        let delegationId = tracked.delegationId
+        let agent = tracked.agentName
+        var streamed = false
+        do {
+            let stream = try await connection.client.subscribeToTask(taskId)
+            for try await event in stream {
+                streamed = true
+                if case .task(let task) = event { delegatedTasks[taskId]?.snapshot = task }
+                await observer?(.progress(id: delegationId, agent: agent, event))
+                if let usage = Self.usage(of: event) {
+                    await observer?(.usage(id: delegationId, agent: agent, usage: usage))
+                }
+            }
+        } catch is CancellationError {
+            return // キャンセル時は session 側の cancel 経路が UI を更新する
+        } catch {
+            // subscribe 不可（終端済み/queue 消失）→ getTask で最終化
+        }
+        await finalizeBackgroundTask(taskId, alreadyStreamed: streamed)
+    }
+
+    /// 背景タスクの最終状態を getTask で確定し、`.finished` を一度だけ流す。
+    private func finalizeBackgroundTask(_ taskId: TaskID, alreadyStreamed: Bool) async {
+        guard let tracked = delegatedTasks[taskId], !tracked.finished,
+              let connection = connections[tracked.agentName] else { return }
+        let task = (try? await connection.client.getTask(taskId)) ?? tracked.snapshot
+        delegatedTasks[taskId]?.snapshot = task
+        delegatedTasks[taskId]?.finished = true
         let status = Self.status(of: task, agent: tracked.agentName)
-        let isDone = task.status.state.isTerminal || task.status.state.isInterrupted
-        if isDone, !tracked.finished {
-            delegatedTasks[taskId]?.finished = true
+        // subscribe が流れなかった場合のみ、最終 task を一度描画（成果物のパートを side-channel へ）。
+        if !alreadyStreamed {
             await observer?(.progress(id: tracked.delegationId, agent: tracked.agentName, .task(task)))
             if let usage = status.usage {
                 await observer?(.usage(id: tracked.delegationId, agent: tracked.agentName, usage: usage))
             }
-            await observer?(.finished(id: tracked.delegationId, agent: tracked.agentName, text: status.text, state: task.status.state))
         }
-        return status
+        await observer?(.finished(id: tracked.delegationId, agent: tracked.agentName, text: status.text, state: task.status.state))
     }
 
     /// 進行中（非終端）の委譲タスク一覧（A2A `tasks/get` で各タスクを refresh）。
@@ -409,8 +450,9 @@ public actor AgentConnectionRegistry {
         if let taskId = connection.taskId {
             lastState = try? await connection.client.cancelTask(taskId).status.state
         }
-        // 同一エージェントの背景タスクを全てキャンセル（並列委譲も取りこぼさない）。
+        // 同一エージェントの背景タスクを全てキャンセル（監視も停止、並列委譲も取りこぼさない）。
         for (taskId, tracked) in delegatedTasks where tracked.agentName == name {
+            tracked.monitor?.cancel()
             if let state = try? await connection.client.cancelTask(taskId).status.state {
                 lastState = state
             }

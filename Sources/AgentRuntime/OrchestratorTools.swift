@@ -98,7 +98,9 @@ public struct DelegateAsyncTool: Tool {
     public var toolDescription: String {
         "Delegate a task to exactly ONE remote agent and return IMMEDIATELY with a task_id, "
             + "WITHOUT waiting for it to finish. Use this to start multiple agents working in parallel. "
-            + "Then poll with list_running_tasks and fetch results with check_task once they complete."
+            + "You do NOT have to wait for it within this turn — you may respond to the user now and the task "
+            + "keeps running in the background; its completion is delivered automatically. "
+            + "Use check_task to fetch a result on demand, or list_running_tasks to see what is still in flight."
     }
     public var inputSchema: JSONSchema {
         .object(
