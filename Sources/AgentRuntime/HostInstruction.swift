@@ -39,4 +39,21 @@ public enum HostInstruction {
         Current agent: \(activeAgent)
         """
     }
+
+    /// 委譲先（リモートエージェント）が 1 件も登録されていないときの単独実行用 instruction。
+    ///
+    /// `root` は「expert delegator」として `list_remote_agents` / `delegate_async` 等で
+    /// 他エージェントへ委譲する前提の本文だが、フリートが空（co-agent 0 件）の場合は
+    /// それらのツールも提供されない。委譲語彙を残すと、特に小型のオンデバイスモデルが
+    /// 存在しない委譲ツールを探して反射的に呼ぼうとし、ツール選択と出力品質が劣化する。
+    /// そのため空フリート時は委譲を一切示唆しない素の指示へ切り替える。
+    public static func solo() -> String {
+        """
+        You are a capable assistant. Answer the user's request directly and concisely.
+
+        - Use the tools available to you when they help complete the request; otherwise answer from your own knowledge.
+        - Don't make up information. If you are not sure, ask the user for more details.
+        - Focus on the most recent parts of the conversation primarily.
+        """
+    }
 }

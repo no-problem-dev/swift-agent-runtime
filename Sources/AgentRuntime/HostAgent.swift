@@ -160,19 +160,27 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
     }
 
     private func makeLoop() async -> AgentLoop<Client> {
-        AgentLoop(
+        // 委譲先（リモートエージェント）が 1 件も登録されていなければ、委譲ツールも
+        // delegator プロンプトも注入しない（単独実行）。空フリートで委譲語彙を残すと、
+        // 特に小型オンデバイスモデルが存在しない委譲ツールを反射的に呼ぼうとして
+        // ツール選択・出力品質が劣化するため。
+        let roster = await registry.rosterJSONLines()
+        let active = await registry.activeAgent
+        let hasAgents = !roster.isEmpty
+        return AgentLoop(
             client: client,
             model: model,
-            tools: makeTools(),
-            systemPrompt: await makeSystemPrompt(),
+            tools: makeTools(includeDelegation: hasAgents),
+            systemPrompt: makeSystemPrompt(agents: roster, activeAgent: active, hasAgents: hasAgents),
             maxSteps: maxSteps,
             maxTokens: maxTokens,
             cachePolicy: cachePolicy
         )
     }
 
-    private func makeTools() -> ToolSet {
-        extraTools + ToolSet {
+    private func makeTools(includeDelegation: Bool) -> ToolSet {
+        guard includeDelegation else { return extraTools }
+        return extraTools + ToolSet {
             ListRemoteAgentsTool(registry: registry)
             SendMessageTool(registry: registry)
             DelegateAsyncTool(registry: registry)
@@ -181,11 +189,11 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         }
     }
 
-    private func makeSystemPrompt() async -> SystemPrompt {
-        let agents = await registry.rosterJSONLines()
-        let active = await registry.activeAgent
-        let root = HostInstruction.root(agents: agents, activeAgent: active)
-        let text = outputInstruction.map { "\(root)\n\n\($0)" } ?? root
+    private func makeSystemPrompt(agents: String, activeAgent: String, hasAgents: Bool) -> SystemPrompt {
+        let base = hasAgents
+            ? HostInstruction.root(agents: agents, activeAgent: activeAgent)
+            : HostInstruction.solo()
+        let text = outputInstruction.map { "\(base)\n\n\($0)" } ?? base
         return SystemPrompt(stringLiteral: text)
     }
 }
