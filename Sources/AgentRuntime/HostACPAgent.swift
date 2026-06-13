@@ -56,9 +56,16 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
     // MARK: - Session lifecycle
 
     public func newSession(_ request: NewSessionRequest) async throws -> NewSessionResponse {
-        let id = SessionId(UUID().uuidString)
+        // SessionId は cwd（per-session ディレクトリ）の名前から**決定的に**導出する。
+        // → 永続アイデンティティと一致し、`session/load` で同じ id を復元できる。
+        let id = Self.sessionId(forCwd: request.cwd)
         sessions[id] = Session(host: makeHost(), cwd: request.cwd)
         return NewSessionResponse(sessionId: id)
+    }
+
+    private static func sessionId(forCwd cwd: String) -> SessionId {
+        let name = (cwd as NSString).lastPathComponent
+        return SessionId(name.isEmpty ? UUID().uuidString : name)
     }
 
     public func loadSession(_ request: LoadSessionRequest) async throws -> LoadSessionResponse {
