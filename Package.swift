@@ -47,6 +47,10 @@ let package = Package(
                 .product(name: "LLMTool", package: "swift-llm-client"),
                 .product(name: "LLMAgentStep", package: "swift-llm-client"),
                 .product(name: "StructuredDataCore", package: "swift-structured-data"),
+                // ACP（host↔app 縦境界）。HostAgent を ACPAgent として露出する。
+                .product(name: "ACPCore", package: "swift-acp"),
+                .product(name: "ACPAgent", package: "swift-acp"),
+                .product(name: "ACPClient", package: "swift-acp"),
             ]
         ),
         .testTarget(
