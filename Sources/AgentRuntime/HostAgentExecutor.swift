@@ -3,6 +3,7 @@ import A2ACore
 import A2AServer
 import LLMClient
 import LLMTool
+import LLMAgentStep
 
 /// `HostAgent`（オーケストレータ）を A2A の `AgentExecutor` として公開するアダプタ。
 ///

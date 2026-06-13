@@ -2,6 +2,7 @@ import AgentLoopKit
 import A2ACore
 import LLMClient
 import LLMTool
+import LLMAgentStep
 import Foundation
 
 /// ルーター型ホスト（公式 A2UI orchestrator サンプル `samples/agent/adk/orchestrator` 相当）。

@@ -1,5 +1,6 @@
 import LLMClient
 import LLMTool
+import LLMAgentStep
 import Foundation
 
 /// swift-llm-client の `executeAgentStep` + `ToolSet` だけで動くツール実行ループ。

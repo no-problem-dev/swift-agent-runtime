@@ -2,6 +2,7 @@ import AgentLoopKit
 import A2ACore
 import LLMClient
 import LLMTool
+import LLMAgentStep
 import Foundation
 
 /// オーケストレータ（ホスト）エージェント（a2a-samples `HostAgent` 相当）。

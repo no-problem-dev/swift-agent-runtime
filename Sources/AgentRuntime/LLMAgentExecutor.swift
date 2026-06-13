@@ -3,6 +3,7 @@ import A2ACore
 import A2AServer
 import LLMClient
 import LLMTool
+import LLMAgentStep
 
 /// `AgentLoop` を A2A の `AgentExecutor` として実行するワーカー（a2a-samples の agent_executor 相当）。
 public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where Client.Model: Sendable {
