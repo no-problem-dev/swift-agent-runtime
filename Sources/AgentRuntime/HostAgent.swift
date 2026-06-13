@@ -65,6 +65,11 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         history.removeAll()
     }
 
+    /// 復元（`session/load`）時に会話履歴を seed する。以後の run/stream はこの文脈を継続する。
+    public func loadHistory(_ messages: [LLMMessage]) {
+        history = messages
+    }
+
     public func run(_ userInput: String) async throws -> String {
         let task = Task { try await self.runInner(userInput) }
         currentRun = task

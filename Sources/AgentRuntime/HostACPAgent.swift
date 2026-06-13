@@ -59,6 +59,7 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
         // SessionId は cwd（per-session ディレクトリ）の名前から**決定的に**導出する。
         // → 永続アイデンティティと一致し、`session/load` で同じ id を復元できる。
         let id = Self.sessionId(forCwd: request.cwd)
+        try? FileManager.default.createDirectory(at: URL(fileURLWithPath: request.cwd), withIntermediateDirectories: true)
         sessions[id] = Session(host: makeHost(), cwd: request.cwd)
         return NewSessionResponse(sessionId: id)
     }
@@ -68,11 +69,26 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
         return SessionId(name.isEmpty ? UUID().uuidString : name)
     }
 
+    // 会話履歴を per-session SSOT（cwd/conversation.json）に永続化し、session/load で復元する。
+    nonisolated private static func conversationURL(cwd: String) -> URL {
+        URL(fileURLWithPath: cwd).appendingPathComponent("conversation.json")
+    }
+    nonisolated private static func persistConversation(_ messages: [LLMMessage], cwd: String) {
+        let url = conversationURL(cwd: cwd)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(messages) { try? data.write(to: url, options: .atomic) }
+    }
+    nonisolated private static func loadConversation(cwd: String) -> [LLMMessage] {
+        guard let data = try? Data(contentsOf: conversationURL(cwd: cwd)),
+              let messages = try? JSONDecoder().decode([LLMMessage].self, from: data) else { return [] }
+        return messages
+    }
+
     public func loadSession(_ request: LoadSessionRequest) async throws -> LoadSessionResponse {
-        // P4 で会話履歴の復元（session/update 再生）を実装する。今は空セッションを用意する。
-        if sessions[request.sessionId] == nil {
-            sessions[request.sessionId] = Session(host: makeHost(), cwd: request.cwd)
-        }
+        // SSOT の会話履歴（cwd/conversation.json）を seed → 復元セッションでも会話を継続できる。
+        let host = makeHost()
+        await host.loadHistory(Self.loadConversation(cwd: request.cwd))
+        sessions[request.sessionId] = Session(host: host, cwd: request.cwd)
         return LoadSessionResponse()
     }
 
@@ -125,8 +141,10 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
                 try await client.sessionUpdate(SessionNotification(sessionId: sessionId, update: update))
             }
         } catch is CancellationError {
-            return PromptResponse(stopReason: .cancelled)
+            stopReason = .cancelled
         }
+        // ターン後、会話履歴を per-session SSOT（cwd/conversation.json）へ永続化する（resume の基盤）。
+        Self.persistConversation(await session.host.messages, cwd: session.cwd)
         return PromptResponse(stopReason: stopReason)
     }
 
