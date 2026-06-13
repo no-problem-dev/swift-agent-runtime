@@ -9,20 +9,14 @@ import Foundation
 /// 親タスクのキャンセルがツリーで伝播する。ストリームが要る場合のみ `events(messages:)` を使う。
 public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model: Sendable {
 
+    /// エージェントが**何をしているか**の意味論イベントのみ。コスト計測・デバッグ・検証制御は
+    /// 持たない（それらは `AgentTelemetry` の sink へ流す）。
     public enum Event: Sendable {
-        /// ターン開始時に組み立てられた最終 system prompt（観測用）。
-        case systemPrompt(rendered: String)
         case thinking(String)
         case toolCall(id: String, name: String)
         case toolResult(id: String, name: String, output: String, isError: Bool)
         case inputRequired(question: String)
         case completed(text: String)
-        /// LLM 1 ステップ分のトークン使用量（コスト計測用）。
-        case usage(TokenUsage, model: String)
-        /// 直前の `completed` 出力が呼び出し側の検証フックで無効と判定された（prompt→generate→validate
-        /// ループ）。`willRetry` が true なら是正再プロンプトで再生成する。`AgentLoop` 自身は発火せず、
-        /// 検証フックを持つ上位オーケストレータ（`HostAgent`）がストリームへ流す。
-        case validationFailed(issues: [String], willRetry: Bool)
     }
 
     private let client: Client
@@ -33,6 +27,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     private let parallelToolExecution: Bool
     private let maxTokens: Int?
     private let cachePolicy: PromptCachePolicy
+    /// 側帯観測（systemPrompt/usage）の注入先。意味論イベントと混ぜない。
+    private let telemetry: AgentTelemetrySink?
 
     public init(
         client: Client,
@@ -42,7 +38,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         maxSteps: Int = 12,
         parallelToolExecution: Bool = true,
         maxTokens: Int? = nil,
-        cachePolicy: PromptCachePolicy = .implicit
+        cachePolicy: PromptCachePolicy = .implicit,
+        telemetry: AgentTelemetrySink? = nil
     ) {
         self.client = client
         self.model = model
@@ -52,6 +49,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         self.parallelToolExecution = parallelToolExecution
         self.maxTokens = maxTokens
         self.cachePolicy = cachePolicy
+        self.telemetry = telemetry
     }
 
     /// 知識カットオフ対策のグラウンディング行。全エージェント（ホスト・ワーカー問わず）の system prompt
@@ -78,7 +76,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 + tools.systemInstructions.map { .context($0) },
             metadata: systemPrompt?.metadata
         )
-        try await onEvent(.systemPrompt(rendered: groundedPrompt.render()))
+        await telemetry?(.systemPrompt(rendered: groundedPrompt.render()))
         for _ in 0..<maxSteps {
             try Task.checkCancellation()
 
@@ -95,7 +93,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 cachePolicy: cachePolicy
             )
 
-            try await onEvent(.usage(response.usage, model: response.model))
+            await telemetry?(.usage(response.usage, model: response.model))
 
             var toolUses: [(id: String, name: String, input: Data)] = []
             var text = ""

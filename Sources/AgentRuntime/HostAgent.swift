@@ -111,17 +111,17 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         }
     }
 
-    public func stream(_ userInput: String) -> AsyncThrowingStream<AgentLoop<Client>.Event, Error> {
+    public func stream(_ userInput: String, telemetry: AgentTelemetrySink? = nil) -> AsyncThrowingStream<AgentLoop<Client>.Event, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     // 検証フックがあれば、各生成後に検証し、無効なら是正再プロンプトを「新しいユーザーターン」
-                    // として送り直して再生成する（会話履歴は保持される）。検証失敗は `.validationFailed` で
-                    // ストリームへ流し、観測側が「再描画 or フォールバック」を判断できるようにする。
+                    // として送り直して再生成する（会話履歴は保持される）。検証失敗は `telemetry` の
+                    // `.validationFailed` で観測側へ流し、「再描画 or フォールバック」を判断できるようにする。
                     var input = userInput
                     var attempt = 0
                     while true {
-                        let loop = await self.makeLoop()
+                        let loop = await self.makeLoop(telemetry: telemetry)
                         let prior = self.history
                         var finalText = ""
                         let transcript = try await loop.run(messages: prior + [.user(input)]) { event in
@@ -134,7 +134,7 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
                         let issues = validator(finalText)
                         if issues.isEmpty { break }
                         let willRetry = attempt < self.maxValidationRetries
-                        continuation.yield(.validationFailed(issues: issues, willRetry: willRetry))
+                        await telemetry?(.validationFailed(issues: issues, willRetry: willRetry))
                         if !willRetry { break }
                         attempt += 1
                         let builder = self.correctivePrompt ?? Self.defaultCorrectivePrompt
@@ -160,7 +160,7 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         history = messages
     }
 
-    private func makeLoop() async -> AgentLoop<Client> {
+    private func makeLoop(telemetry: AgentTelemetrySink? = nil) async -> AgentLoop<Client> {
         // 委譲先（リモートエージェント）が 1 件も登録されていなければ、委譲ツールも
         // delegator プロンプトも注入しない（単独実行）。空フリートで委譲語彙を残すと、
         // 特に小型オンデバイスモデルが存在しない委譲ツールを反射的に呼ぼうとして
@@ -175,7 +175,8 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
             systemPrompt: makeSystemPrompt(agents: roster, activeAgent: active, hasAgents: hasAgents),
             maxSteps: maxSteps,
             maxTokens: maxTokens,
-            cachePolicy: cachePolicy
+            cachePolicy: cachePolicy,
+            telemetry: telemetry
         )
     }
 

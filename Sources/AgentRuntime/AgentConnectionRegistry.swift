@@ -85,6 +85,8 @@ public actor AgentConnectionRegistry {
     private var connections: [String: Connection] = [:]
     private let mode: DeliveryMode
     private let observer: DelegationObserver?
+    /// ワーカー usage の metrics 側帯シンク。委譲ライフサイクル（observer）とは別経路。
+    private let usageObserver: DelegationUsageObserver?
     /// 背景委譲（delegate_async）の既定の完了受け取り方。delegateAsync で個別指定が無ければこれを使う。
     private let defaultDelivery: BackgroundDelivery
 
@@ -121,9 +123,10 @@ public actor AgentConnectionRegistry {
     /// root instruction に出す現在エージェント（継続中のみ名前、なければ `"None"`）。
     public var activeAgent: String { sessionActive ? (lastAgent ?? "None") : "None" }
 
-    public init(mode: DeliveryMode = .streaming, observer: DelegationObserver? = nil, defaultDelivery: BackgroundDelivery = .all) {
+    public init(mode: DeliveryMode = .streaming, observer: DelegationObserver? = nil, usageObserver: DelegationUsageObserver? = nil, defaultDelivery: BackgroundDelivery = .all) {
         self.mode = mode
         self.observer = observer
+        self.usageObserver = usageObserver
         self.defaultDelivery = defaultDelivery
     }
 
@@ -241,7 +244,7 @@ public actor AgentConnectionRegistry {
         if !messageText.isEmpty { pieces.append(messageText) }
         let aggregated = pieces.joined(separator: "\n")
 
-        if let usage { await observer?(.usage(id: delegationId, agent: name, usage: usage)) }
+        if let usage { await usageObserver?(delegationId, name, usage) }
         await observer?(.finished(id: delegationId, agent: name, text: aggregated, state: finalState))
         return AgentSendOutcome(agentName: name, text: aggregated, state: finalState, usage: usage)
     }
@@ -277,6 +280,7 @@ public actor AgentConnectionRegistry {
         let client = connection.client
         let mode = self.mode
         let observer = self.observer
+        let usageObserver = self.usageObserver
 
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -288,7 +292,7 @@ public actor AgentConnectionRegistry {
                         await self.recordIdentifiers(from: event, for: name)
                         if let state = Self.taskState(of: event) { finalState = state }
                         if let usage = Self.usage(of: event) {
-                            await observer?(.usage(id: delegationId, agent: name, usage: usage))
+                            await usageObserver?(delegationId, name, usage)
                         }
                         continuation.yield(event)
                     }
@@ -443,7 +447,7 @@ public actor AgentConnectionRegistry {
                 if case .task(let task) = event { delegatedTasks[taskId]?.snapshot = task }
                 await observer?(.progress(id: delegationId, agent: agent, event))
                 if let usage = Self.usage(of: event) {
-                    await observer?(.usage(id: delegationId, agent: agent, usage: usage))
+                    await usageObserver?(delegationId, agent, usage)
                 }
             }
         } catch is CancellationError {
@@ -466,7 +470,7 @@ public actor AgentConnectionRegistry {
         if !alreadyStreamed {
             await observer?(.progress(id: tracked.delegationId, agent: tracked.agentName, .task(task)))
             if let usage = status.usage {
-                await observer?(.usage(id: tracked.delegationId, agent: tracked.agentName, usage: usage))
+                await usageObserver?(tracked.delegationId, tracked.agentName, usage)
             }
         }
         await observer?(.finished(id: tracked.delegationId, agent: tracked.agentName, text: status.text, state: task.status.state))
@@ -485,7 +489,7 @@ public actor AgentConnectionRegistry {
             delegatedTasks[taskId]?.snapshot = task
             await observer?(.progress(id: delegationId, agent: agent, .task(task)))
             if let usage = Self.usage(of: .task(task)) {
-                await observer?(.usage(id: delegationId, agent: agent, usage: usage))
+                await usageObserver?(delegationId, agent, usage)
             }
             if task.status.state.isTerminal || task.status.state.isInterrupted {
                 if !(delegatedTasks[taskId]?.finished ?? true) {
@@ -509,7 +513,7 @@ public actor AgentConnectionRegistry {
         if case .task(let task) = event { delegatedTasks[taskId]?.snapshot = task }
         await observer?(.progress(id: tracked.delegationId, agent: tracked.agentName, event))
         if let usage = Self.usage(of: event) {
-            await observer?(.usage(id: tracked.delegationId, agent: tracked.agentName, usage: usage))
+            await usageObserver?(tracked.delegationId, tracked.agentName, usage)
         }
         if let state = Self.taskState(of: event), state.isTerminal || state.isInterrupted,
            !(delegatedTasks[taskId]?.finished ?? true) {

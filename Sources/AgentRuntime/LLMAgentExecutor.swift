@@ -50,6 +50,10 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
         try await updater.startWork()
 
+        // ワーカーが消費したトークンを集約し、完了時に artifact metadata で呼び出し元へ返す。
+        // usage（metrics）と systemPrompt（debug）は意味論イベントと別の telemetry 側帯で受ける。
+        let usage = UsageAccumulator()
+        let onSystemPrompt = self.onSystemPrompt
         let loop = AgentLoop(
             client: client,
             model: model,
@@ -57,11 +61,16 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
             systemPrompt: systemPrompt,
             maxSteps: maxSteps,
             maxTokens: maxTokens,
-            cachePolicy: cachePolicy
+            cachePolicy: cachePolicy,
+            telemetry: { telemetry in
+                switch telemetry {
+                case .usage(let u, _): await usage.add(u)
+                case .systemPrompt(let rendered): await onSystemPrompt?(rendered)
+                case .validationFailed: break
+                }
+            }
         )
 
-        // ワーカーが消費したトークンを集約し、完了時に artifact metadata で呼び出し元へ返す。
-        var totalUsage: TokenUsage?
         let messages = await makeMessages(from: context)
         do {
             let transcript = try await loop.run(messages: messages) { event in
@@ -72,20 +81,14 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                     }
                 case .toolCall(_, let name):
                     try await updater.updateStatus(.working, message: updater.newAgentMessage([.text("🔧 \(name)")]))
-                case .systemPrompt(let rendered):
-                    await onSystemPrompt?(rendered)
                 case .toolResult:
                     break
-                case .usage(let usage, _):
-                    totalUsage = totalUsage?.adding(usage) ?? usage
                 case .inputRequired(let question):
                     try await updater.requiresInput(message: updater.newAgentMessage([.text(question)]))
                 case .completed(let text):
-                    await updater.addArtifact([.text(text)], name: artifactName, metadata: totalUsage.flatMap(UsageMetadata.encode))
+                    let total = await usage.total
+                    await updater.addArtifact([.text(text)], name: artifactName, metadata: total.flatMap(UsageMetadata.encode))
                     try await updater.complete()
-                case .validationFailed:
-                    // ワーカー（単一 AgentLoop）は検証フックを持たないため発火しない（網羅性のための no-op）。
-                    break
                 }
             }
             await historyStore?.save(transcript, for: context.contextId.rawValue)

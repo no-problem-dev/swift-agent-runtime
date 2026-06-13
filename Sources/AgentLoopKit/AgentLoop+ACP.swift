@@ -26,8 +26,6 @@ public extension AgentLoop {
             return .agentMessageChunk(ContentChunk(content: .text(TextContent(text: question))))
         case let .completed(text):
             return text.isEmpty ? nil : .agentMessageChunk(ContentChunk(content: .text(TextContent(text: text))))
-        case .systemPrompt, .usage, .validationFailed:
-            return nil
         }
     }
 

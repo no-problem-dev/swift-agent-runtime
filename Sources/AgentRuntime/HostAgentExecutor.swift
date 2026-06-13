@@ -36,11 +36,7 @@ public actor HostAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                     try await updater.updateStatus(.working, message: updater.newAgentMessage([.text("→ \(name)")]))
                 case .completed(let text):
                     finalText = text
-                case .validationFailed(let issues, let willRetry):
-                    if willRetry {
-                        try await updater.updateStatus(.working, message: updater.newAgentMessage([.text("出力を検証中（再生成）… \(issues.count) 件の問題")]))
-                    }
-                case .toolResult, .inputRequired, .usage, .systemPrompt:
+                case .toolResult, .inputRequired:
                     break
                 }
             }
