@@ -61,7 +61,7 @@ struct TurnEndingToolTests {
         }
         #expect(text == "rendering")
         #expect(await counter.count == 1)
-        #expect(events.contains { if case .toolResult(let name, _, let isError) = $0 { return name == "send_ui" && !isError } else { return false } })
+        #expect(events.contains { if case .toolResult(_, let name, _, let isError) = $0 { return name == "send_ui" && !isError } else { return false } })
     }
 
     @Test("エラー結果はモデルへ返りループが継続する")
@@ -80,6 +80,6 @@ struct TurnEndingToolTests {
         }
         #expect(text == "final answer")
         #expect(await counter.count == 2)
-        #expect(events.contains { if case .toolResult(let name, _, let isError) = $0 { return name == "send_ui" && isError } else { return false } })
+        #expect(events.contains { if case .toolResult(_, let name, _, let isError) = $0 { return name == "send_ui" && isError } else { return false } })
     }
 }

@@ -13,7 +13,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         case systemPrompt(rendered: String)
         case thinking(String)
         case toolCall(id: String, name: String)
-        case toolResult(name: String, output: String, isError: Bool)
+        case toolResult(id: String, name: String, output: String, isError: Bool)
         case inputRequired(question: String)
         case completed(text: String)
         /// LLM 1 ステップ分のトークン使用量（コスト計測用）。
@@ -164,7 +164,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                     ? .failure(result.stringValue)
                     : .success(result.stringValue)
                 results.append((toolCallId: use.id, name: use.name, content: content))
-                try await onEvent(.toolResult(name: use.name, output: result.stringValue, isError: result.isError))
+                try await onEvent(.toolResult(id: use.id, name: use.name, output: result.stringValue, isError: result.isError))
             }
             messages.append(.toolResults(results))
 

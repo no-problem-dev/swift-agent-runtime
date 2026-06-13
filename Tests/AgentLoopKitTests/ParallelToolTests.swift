@@ -67,7 +67,7 @@ struct ParallelToolTests {
         var final: String?
         try await loop.run(messages: [.user("go")]) { event in
             switch event {
-            case .toolResult(let name, _, _): toolResults.append(name)
+            case .toolResult(_, let name, _, _): toolResults.append(name)
             case .completed(let text): final = text
             default: break
             }
@@ -87,7 +87,7 @@ struct ParallelToolTests {
         var final: String?
         try await loop.run(messages: [.user("go")]) { event in
             switch event {
-            case .toolResult(let name, _, _): toolResults.append(name)
+            case .toolResult(_, let name, _, _): toolResults.append(name)
             case .completed(let text): final = text
             default: break
             }
