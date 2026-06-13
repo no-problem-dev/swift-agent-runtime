@@ -79,7 +79,7 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                     if !text.isEmpty {
                         try await updater.updateStatus(.working, message: updater.newAgentMessage([.text(text)]))
                     }
-                case .toolCall(_, let name):
+                case .toolCall(_, let name, _):
                     try await updater.updateStatus(.working, message: updater.newAgentMessage([.text("🔧 \(name)")]))
                 case .toolResult:
                     break

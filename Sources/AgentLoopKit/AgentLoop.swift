@@ -13,7 +13,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     /// 持たない（それらは `AgentTelemetry` の sink へ流す）。
     public enum Event: Sendable {
         case thinking(String)
-        case toolCall(id: String, name: String)
+        /// `input` はツール呼び出しの生引数（JSON）。ACP `tool_call.rawInput` へそのまま射影する。
+        case toolCall(id: String, name: String, input: Data)
         case toolResult(id: String, name: String, output: String, isError: Bool)
         case inputRequired(question: String)
         case completed(text: String)
@@ -76,7 +77,6 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 + tools.systemInstructions.map { .context($0) },
             metadata: systemPrompt?.metadata
         )
-        await telemetry?(.systemPrompt(rendered: groundedPrompt.render()))
         for _ in 0..<maxSteps {
             try Task.checkCancellation()
 
@@ -93,6 +93,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 cachePolicy: cachePolicy
             )
 
+            // usage はコスト計測（metrics）として telemetry へ。意味論イベント（Event）には混ぜない。
+            // ACP の usage_update への射影は ACP 境界（HostACPAgent）でこの telemetry から行う。
             await telemetry?(.usage(response.usage, model: response.model))
 
             var toolUses: [(id: String, name: String, input: Data)] = []
@@ -124,7 +126,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
             }
 
             for use in toolUses {
-                try await onEvent(.toolCall(id: use.id, name: use.name))
+                try await onEvent(.toolCall(id: use.id, name: use.name, input: use.input))
             }
 
             // 複数ツールは子タスクで並列実行し、結果を呼び出し順に整列する。

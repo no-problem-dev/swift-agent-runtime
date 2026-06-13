@@ -43,13 +43,15 @@ struct ACPProjectionTests {
             updates.append(update)
         }
 
-        // tool_call(search) announced in_progress, correlated by id
+        // tool_call(search) announced in_progress, correlated by id, with kind + rawInput
         guard case let .toolCall(call)? = updates.first(where: { if case .toolCall = $0 { return true } else { return false } }) else {
             Issue.record("expected a tool_call update; got \(updates)"); return
         }
         #expect(call.toolCallId == ToolCallId("t1"))
-        #expect(call.title == "search")
+        #expect(call.title == "Search")
+        #expect(call.kind == .search)
         #expect(call.status == .inProgress)
+        #expect(call.rawInput != nil)
 
         // tool_call_update(t1) completed, same id
         guard case let .toolCallUpdate(update)? = updates.first(where: { if case .toolCallUpdate = $0 { return true } else { return false } }) else {

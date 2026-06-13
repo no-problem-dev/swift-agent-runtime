@@ -94,7 +94,7 @@ struct AgentSessionTests {
         var finalText = ""
         for try await step in await session.stream("go") {
             switch step {
-            case .toolCall(_, let name): if name == "send_message" { sawToolCall = true }
+            case .toolCall(_, let name, _): if name == "send_message" { sawToolCall = true }
             case .completed(let text): finalText = text
             default: break
             }

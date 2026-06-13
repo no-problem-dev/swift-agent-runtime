@@ -1,3 +1,4 @@
+import Foundation
 import LLMClient
 import LLMAgentStep
 
@@ -9,7 +10,7 @@ import LLMAgentStep
 /// 側帯観測（usage/systemPrompt 等）は `AgentTelemetry`（非ジェネリック）を直接使う。
 public enum AgentEvent: Sendable {
     case thinking(String)
-    case toolCall(id: String, name: String)
+    case toolCall(id: String, name: String, input: Data)
     case toolResult(id: String, name: String, output: String, isError: Bool)
     case inputRequired(question: String)
     case completed(text: String)
@@ -20,7 +21,7 @@ extension AgentEvent {
     public init<C: AgentCapableClient>(_ event: AgentLoop<C>.Event) where C.Model: Sendable {
         switch event {
         case .thinking(let text): self = .thinking(text)
-        case .toolCall(let id, let name): self = .toolCall(id: id, name: name)
+        case .toolCall(let id, let name, let input): self = .toolCall(id: id, name: name, input: input)
         case .toolResult(let id, let name, let output, let isError):
             self = .toolResult(id: id, name: name, output: output, isError: isError)
         case .inputRequired(let question): self = .inputRequired(question: question)

@@ -46,7 +46,21 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
     // MARK: - Negotiation
 
     public func initialize(_ request: InitializeRequest) async throws -> InitializeResponse {
-        InitializeResponse(protocolVersion: .v1, agentCapabilities: AgentCapabilities(loadSession: true))
+        // 実装しているメソッドに合わせて capabilities を申告する（過少・過大申告を避ける）。
+        // session list/delete/resume/close は実装済み。prompt は text のみ消費するため
+        // image/audio/embeddedContext は既定の false。
+        InitializeResponse(
+            protocolVersion: .v1,
+            agentCapabilities: AgentCapabilities(
+                loadSession: true,
+                sessionCapabilities: SessionCapabilities(
+                    list: .init(),
+                    delete: .init(),
+                    resume: .init(),
+                    close: .init()
+                )
+            )
+        )
     }
 
     public func authenticate(_ request: AuthenticateRequest) async throws -> AuthenticateResponse {
@@ -131,6 +145,22 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
 
         let sessionId = request.sessionId
         let client = self.client
+        let baseTelemetry = self.telemetry
+        // ACP 境界での usage 射影。usage は意味論イベントではなく metrics（telemetry）だが、
+        // その ACP 対応物 `usage_update` は session/update の標準語彙。ここで telemetry から
+        // 射影してクライアントに流すことで、`AgentLoop.Event`（意味論専用）を汚さずに
+        // ACP のライブゲージを成立させる。種別内訳は ACP 語彙外のため used/size のみ載せ、
+        // 内訳は baseTelemetry（meter）側で扱う。
+        let telemetry: AgentTelemetrySink = { event in
+            if case let .usage(usage, _) = event {
+                let used = UInt64(max(0, usage.inputTokens + usage.outputTokens))
+                try? await client.sessionUpdate(SessionNotification(
+                    sessionId: sessionId,
+                    update: .usageUpdate(UsageUpdate(used: used, size: 0))
+                ))
+            }
+            await baseTelemetry?(event)
+        }
         // inputRequired と completed はどちらも agentMessageChunk に射影されるため、
         // 「ホストがユーザー入力を要求してターンを中断した」かは StopReason で区別する。
         var stopReason = StopReason.endTurn
