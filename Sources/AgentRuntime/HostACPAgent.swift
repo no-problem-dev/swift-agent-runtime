@@ -10,6 +10,12 @@ public enum HostACPAgentError: Error, Sendable {
     case unsupported(String)
 }
 
+public extension StopReason {
+    /// 非標準（runtime 拡張）: ホストがユーザー入力を要求してターンを中断した。
+    /// クライアントは入力 UI を出し、回答を次の `prompt` として送り直す。
+    static let inputRequired = StopReason("input_required")
+}
+
 /// `HostAgent`（内部で A2A ワーカーを回すオーケストレータ）を **ACP エージェント**として露出する。
 ///
 /// app↔host の縦境界を ACP で実現する: アプリは ACP クライアント（`prompt` で駆動）、これは ACP
@@ -102,15 +108,19 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
 
         let sessionId = request.sessionId
         let client = self.client
+        // inputRequired と completed はどちらも agentMessageChunk に射影されるため、
+        // 「ホストがユーザー入力を要求してターンを中断した」かは StopReason で区別する。
+        var stopReason = StopReason.endTurn
         do {
             for try await event in await session.host.stream(text, telemetry: telemetry) {
+                if case .inputRequired = event { stopReason = .inputRequired }
                 guard let update = AgentLoop<Client>.sessionUpdate(for: event) else { continue }
                 try await client.sessionUpdate(SessionNotification(sessionId: sessionId, update: update))
             }
         } catch is CancellationError {
             return PromptResponse(stopReason: .cancelled)
         }
-        return PromptResponse(stopReason: .endTurn)
+        return PromptResponse(stopReason: stopReason)
     }
 
     public func cancel(_ notification: CancelNotification) async throws {
