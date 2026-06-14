@@ -8,6 +8,8 @@ public enum AgentRuntimeError: Error, Sendable, Equatable, LocalizedError {
     case unsupportedImageMediaType(String)
     /// 画像 base64 のデコードに失敗した。
     case invalidImageData
+    /// LLM へ貫通できないリソース（未対応 blob mimeType・resource_link・破損 base64 等）。silent drop しない。
+    case unsupportedResource(String)
 
     public var errorDescription: String? {
         switch self {
@@ -15,6 +17,7 @@ public enum AgentRuntimeError: Error, Sendable, Equatable, LocalizedError {
         case .routingFailed(let reason): "Routing failed: \(reason)"
         case .unsupportedImageMediaType(let mime): "Unsupported image media type: \(mime)"
         case .invalidImageData: "Invalid image data (base64 decode failed)"
+        case .unsupportedResource(let detail): "Unsupported resource: \(detail)"
         }
     }
 }

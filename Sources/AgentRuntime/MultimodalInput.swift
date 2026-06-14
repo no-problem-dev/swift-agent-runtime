@@ -6,8 +6,9 @@ import Foundation
 /// ユーザープロンプトのマルチモーダルコンテンツ（テキスト + 画像）を `LLMMessage` まで貫通させる変換層。
 ///
 /// ACP `ContentBlock` / A2A `Part` の画像（base64 data + mimeType / bytes + mediaType）を LLM の
-/// `MessageContent.image` に射影する。テキストのみの入力は従来どおり `.user(text)` と同一の出力を返す
-/// （回帰防止）。非対応の画像 mimeType は黙って捨てず `unsupportedImageMediaType` を throw する。
+/// `MessageContent.image` に、PDF/テキスト添付（ACP `.resource` の blob/text）を `MessageContent.document`
+/// に射影する。テキストのみの入力は従来どおり `.user(text)` と同一の出力を返す（回帰防止）。
+/// 非対応の画像 mimeType / リソースは黙って捨てず `unsupportedImageMediaType` / `unsupportedResource` を throw する。
 enum MultimodalInput {
 
     static func imageMediaType(for mimeType: String) throws -> ImageMediaType {
@@ -18,6 +19,12 @@ enum MultimodalInput {
         case "image/webp": return .webp
         default: throw AgentRuntimeError.unsupportedImageMediaType(mimeType)
         }
+    }
+
+    /// uri（file:// やパス文字列）から末尾コンポーネントをタイトルとして取り出す。
+    private static func title(fromURI uri: String) -> String? {
+        let trimmed = URL(string: uri)?.lastPathComponent ?? (uri as NSString).lastPathComponent
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// ACP プロンプト（`[ContentBlock]`）→ ユーザー `LLMMessage`。
@@ -34,12 +41,40 @@ enum MultimodalInput {
                 }
                 contents.append(.image(ImageContent(source: .base64(data), mediaType: try imageMediaType(for: image.mimeType))))
             case let .resource(resource):
-                if case let .text(text) = resource.resource { contents.append(.text(text.text)) }
-            case .audio, .resourceLink, .unknown:
+                contents.append(try documentContent(from: resource.resource))
+            case let .resourceLink(link):
+                throw AgentRuntimeError.unsupportedResource("resource_link (\(link.uri))")
+            case .audio, .unknown:
                 break
             }
         }
         return collapse(contents, textSeparator: "")
+    }
+
+    /// ACP `EmbeddedResource` → `MessageContent.document`。
+    /// text リソース（抽出済みテキスト）は plainText document、blob リソース（生バイト）は
+    /// mimeType "application/pdf" のみ pdf document に射影する。それ以外は throw（silent drop しない）。
+    private static func documentContent(from resource: EmbeddedResourceResource) throws -> LLMMessage.MessageContent {
+        switch resource {
+        case let .text(text):
+            return .document(DocumentContent(
+                source: .base64(Data(text.text.utf8)),
+                mediaType: .plainText,
+                title: title(fromURI: text.uri)
+            ))
+        case let .blob(blob):
+            guard blob.mimeType == "application/pdf" else {
+                throw AgentRuntimeError.unsupportedResource("blob mimeType \(blob.mimeType ?? "(none)") (\(blob.uri))")
+            }
+            guard let data = Data(base64Encoded: blob.blob) else {
+                throw AgentRuntimeError.unsupportedResource("invalid base64 blob (\(blob.uri))")
+            }
+            return .document(DocumentContent(
+                source: .base64(data),
+                mediaType: .pdf,
+                title: title(fromURI: blob.uri)
+            ))
+        }
     }
 
     /// A2A `[Part]` → ユーザー `LLMMessage`。

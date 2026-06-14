@@ -9,6 +9,9 @@ struct MultimodalInputTests {
     private let pngBytes = Data([0x89, 0x50, 0x4E, 0x47])
     private var pngBase64: String { pngBytes.base64EncodedString() }
 
+    private let pdfBytes = Data([0x25, 0x50, 0x44, 0x46]) // "%PDF"
+    private var pdfBase64: String { pdfBytes.base64EncodedString() }
+
     /// テキストのみメッセージが `.user(String)` と同形（contents == [.text]）であることを確認しつつ本文を返す。
     private func soleText(of message: LLMMessage) -> String? {
         guard message.contents.count == 1, case let .text(value) = message.contents.first else { return nil }
@@ -110,6 +113,89 @@ struct MultimodalInputTests {
         let parts: [Part] = [.file(bytes: pngBytes, mediaType: "application/pdf")]
         #expect(throws: AgentRuntimeError.unsupportedImageMediaType("application/pdf")) {
             _ = try MultimodalInput.userMessage(from: parts)
+        }
+    }
+
+    // MARK: - ACP resource（PDF / テキスト添付）→ document
+
+    @Test("ACP: PDF blob リソース → document(.pdf, base64) が含まれる")
+    func acpPdfBlobResource() throws {
+        let blocks: [ContentBlock] = [
+            .text(TextContent(text: "このPDFを要約して")),
+            .resource(EmbeddedResource(resource: .blob(BlobResourceContents(
+                blob: pdfBase64, uri: "file:///tmp/report.pdf", mimeType: "application/pdf"
+            )))),
+        ]
+        let message = try MultimodalInput.userMessage(from: blocks)
+
+        #expect(message.role == .user)
+        let documents = message.documents
+        #expect(documents.count == 1)
+        #expect(documents.first?.mediaType == .pdf)
+        #expect(documents.first?.title == "report.pdf")
+        if case let .base64(data) = documents.first?.source {
+            #expect(data == pdfBytes)
+        } else {
+            Issue.record("expected base64 source")
+        }
+        let texts = message.contents.compactMap { content -> String? in
+            if case let .text(value) = content { return value }
+            return nil
+        }
+        #expect(texts == ["このPDFを要約して"])
+    }
+
+    @Test("ACP: text/markdown text リソース → document(.plainText) になる")
+    func acpMarkdownTextResource() throws {
+        let blocks: [ContentBlock] = [
+            .resource(EmbeddedResource(resource: .text(TextResourceContents(
+                text: "# Title\nbody", uri: "file:///notes/readme.md", mimeType: "text/markdown"
+            )))),
+        ]
+        let message = try MultimodalInput.userMessage(from: blocks)
+
+        let documents = message.documents
+        #expect(documents.count == 1)
+        #expect(documents.first?.mediaType == .plainText)
+        #expect(documents.first?.title == "readme.md")
+        if case let .base64(data) = documents.first?.source {
+            #expect(data == Data("# Title\nbody".utf8))
+        } else {
+            Issue.record("expected base64 source")
+        }
+    }
+
+    @Test("ACP: PDF 以外の blob mimeType は silent drop せず throw する")
+    func acpNonPdfBlobThrows() {
+        let blocks: [ContentBlock] = [
+            .resource(EmbeddedResource(resource: .blob(BlobResourceContents(
+                blob: pdfBase64, uri: "file:///x.bin", mimeType: "application/octet-stream"
+            )))),
+        ]
+        #expect(throws: AgentRuntimeError.self) {
+            _ = try MultimodalInput.userMessage(from: blocks)
+        }
+    }
+
+    @Test("ACP: 不正な base64 の PDF blob は throw する")
+    func acpInvalidPdfBlobThrows() {
+        let blocks: [ContentBlock] = [
+            .resource(EmbeddedResource(resource: .blob(BlobResourceContents(
+                blob: "!!!not-base64!!!", uri: "file:///x.pdf", mimeType: "application/pdf"
+            )))),
+        ]
+        #expect(throws: AgentRuntimeError.self) {
+            _ = try MultimodalInput.userMessage(from: blocks)
+        }
+    }
+
+    @Test("ACP: resource_link は inline 不可のため throw する")
+    func acpResourceLinkThrows() {
+        let blocks: [ContentBlock] = [
+            .resourceLink(ResourceLink(name: "report", uri: "file:///tmp/report.pdf", mimeType: "application/pdf")),
+        ]
+        #expect(throws: AgentRuntimeError.self) {
+            _ = try MultimodalInput.userMessage(from: blocks)
         }
     }
 }
