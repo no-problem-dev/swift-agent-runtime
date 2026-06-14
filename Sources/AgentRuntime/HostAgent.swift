@@ -71,7 +71,12 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
     }
 
     public func run(_ userInput: String) async throws -> String {
-        let task = Task { try await self.runInner(userInput) }
+        try await run(.user(userInput))
+    }
+
+    /// マルチモーダル入力（画像 + テキスト）を受ける run。テキストのみなら `.user(String)` と同一挙動。
+    public func run(_ userMessage: LLMMessage) async throws -> String {
+        let task = Task { try await self.runInner(userMessage) }
         currentRun = task
         defer { currentRun = nil }
         // 呼び出し元タスクのキャンセルを保持タスクへ橋渡しし、構造化キャンセルと cancel() を同経路にする。
@@ -96,40 +101,47 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         }
     }
 
-    private func runInner(_ userInput: String) async throws -> String {
+    private func runInner(_ userMessage: LLMMessage) async throws -> String {
         // 全トランスクリプト（委譲のツール呼び出し・結果含む）を履歴として保持。
         // → 次ターンで「さっき何を調べた？」等にツール無しで文脈から答えられる。
         // 検証フックがあれば、無効出力を是正再プロンプトで再生成する（prompt→generate→validate）。
-        var input = userInput
+        let originalText = Self.text(of: userMessage)
+        var input = userMessage
         var attempt = 0
         var finalText = ""
         while true {
             let loop = await makeLoop()
-            history = try await loop.run(messages: history + [.user(input)]) { event in
+            history = try await loop.run(messages: history + [input]) { event in
                 if case .completed(let text) = event { finalText = text }
             }
             guard let validator = outputValidator else { return finalText }
             let issues = validator(finalText)
             if issues.isEmpty || attempt >= maxValidationRetries { return finalText }
             attempt += 1
-            input = (correctivePrompt ?? Self.defaultCorrectivePrompt)(issues, userInput)
+            input = .user((correctivePrompt ?? Self.defaultCorrectivePrompt)(issues, originalText))
         }
     }
 
     public func stream(_ userInput: String, telemetry: AgentTelemetrySink? = nil) -> AsyncThrowingStream<AgentLoop<Client>.Event, Error> {
+        stream(.user(userInput), telemetry: telemetry)
+    }
+
+    /// マルチモーダル入力（画像 + テキスト）を受ける stream。テキストのみなら `.user(String)` と同一挙動。
+    public func stream(_ userMessage: LLMMessage, telemetry: AgentTelemetrySink? = nil) -> AsyncThrowingStream<AgentLoop<Client>.Event, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     // 検証フックがあれば、各生成後に検証し、無効なら是正再プロンプトを「新しいユーザーターン」
                     // として送り直して再生成する（会話履歴は保持される）。検証失敗は `telemetry` の
                     // `.validationFailed` で観測側へ流し、「再描画 or フォールバック」を判断できるようにする。
-                    var input = userInput
+                    let originalText = Self.text(of: userMessage)
+                    var input = userMessage
                     var attempt = 0
                     while true {
                         let loop = await self.makeLoop(telemetry: telemetry)
                         let prior = self.history
                         var finalText = ""
-                        let transcript = try await loop.run(messages: prior + [.user(input)]) { event in
+                        let transcript = try await loop.run(messages: prior + [input]) { event in
                             if case .completed(let text) = event { finalText = text }
                             continuation.yield(event)
                         }
@@ -143,7 +155,7 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
                         if !willRetry { break }
                         attempt += 1
                         let builder = self.correctivePrompt ?? Self.defaultCorrectivePrompt
-                        input = builder(issues, userInput)
+                        input = .user(builder(issues, originalText))
                     }
                     continuation.finish()
                 } catch {
@@ -152,6 +164,14 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// メッセージのテキスト部分を結合（是正再プロンプトの `originalInput` 用）。
+    private static func text(of message: LLMMessage) -> String {
+        message.contents.compactMap { content -> String? in
+            if case let .text(value) = content { return value }
+            return nil
+        }.joined(separator: "\n")
     }
 
     /// 是正再プロンプトの汎用フォールバック（ドメイン固有のタグ等が要る場合は init で `correctivePrompt` を注入）。

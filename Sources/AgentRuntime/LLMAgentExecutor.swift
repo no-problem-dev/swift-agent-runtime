@@ -71,7 +71,7 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
             }
         )
 
-        let messages = await makeMessages(from: context)
+        let messages = try await makeMessages(from: context)
         do {
             let transcript = try await loop.run(messages: messages) { event in
                 switch event {
@@ -105,23 +105,29 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
     }
 
     /// historyStore があればネイティブ履歴 + 新規入力、なければ A2A タスク履歴からの復元。
-    private func makeMessages(from context: RequestContext) async -> [LLMMessage] {
+    private func makeMessages(from context: RequestContext) async throws -> [LLMMessage] {
         if let historyStore {
             let history = await historyStore.history(for: context.contextId.rawValue)
-            return history + [.user(context.getUserInput())]
+            return history + [try userMessage(from: context)]
         }
-        return reconstructMessages(from: context)
+        return try reconstructMessages(from: context)
+    }
+
+    /// 新規ユーザー入力の `[Part]` を、画像を貫通させて `LLMMessage` 化する。
+    private func userMessage(from context: RequestContext) throws -> LLMMessage {
+        guard let parts = context.message?.parts, !parts.isEmpty else { return .user("") }
+        return try MultimodalInput.userMessage(from: parts)
     }
 
     // resume（同一タスクへの再送）で文脈を引き継ぐため、A2A タスク履歴を LLM 会話へ復元する。
-    private func reconstructMessages(from context: RequestContext) -> [LLMMessage] {
+    private func reconstructMessages(from context: RequestContext) throws -> [LLMMessage] {
         var messages: [LLMMessage] = []
         for historical in context.currentTask?.history ?? [] {
             let text = historical.parts.compactMap(\.text).joined()
             guard !text.isEmpty else { continue }
             messages.append(historical.role == .agent ? .assistant(text) : .user(text))
         }
-        messages.append(.user(context.getUserInput()))
+        messages.append(try userMessage(from: context))
         return messages
     }
 }

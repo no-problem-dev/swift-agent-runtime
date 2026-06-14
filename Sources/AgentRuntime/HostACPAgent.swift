@@ -47,12 +47,13 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
 
     public func initialize(_ request: InitializeRequest) async throws -> InitializeResponse {
         // 実装しているメソッドに合わせて capabilities を申告する（過少・過大申告を避ける）。
-        // session list/delete/resume/close は実装済み。prompt は text のみ消費するため
-        // image/audio/embeddedContext は既定の false。
+        // session list/delete/resume/close は実装済み。prompt は text + image を消費する
+        // （image は base64 を LLMMessage.image へ射影）。audio/embeddedContext は未対応。
         InitializeResponse(
             protocolVersion: .v1,
             agentCapabilities: AgentCapabilities(
                 loadSession: true,
+                promptCapabilities: PromptCapabilities(image: true),
                 sessionCapabilities: SessionCapabilities(
                     list: .init(),
                     delete: .init(),
@@ -138,10 +139,9 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
         guard let session = sessions[request.sessionId] else {
             throw HostACPAgentError.unknownSession(request.sessionId)
         }
-        let text = request.prompt.compactMap { block -> String? in
-            if case let .text(content) = block { return content.text }
-            return nil
-        }.joined()
+        // 画像コンテンツ（base64 + mimeType）を平坦化せず LLMMessage まで貫通させる。
+        // テキストのみの入力は従来の `.user(text)` と同一出力になる（回帰なし）。
+        let userMessage = try MultimodalInput.userMessage(from: request.prompt)
 
         let sessionId = request.sessionId
         let client = self.client
@@ -165,7 +165,7 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
         // 「ホストがユーザー入力を要求してターンを中断した」かは StopReason で区別する。
         var stopReason = StopReason.endTurn
         do {
-            for try await event in await session.host.stream(text, telemetry: telemetry) {
+            for try await event in await session.host.stream(userMessage, telemetry: telemetry) {
                 if case .inputRequired = event { stopReason = .inputRequired }
                 guard let update = AgentLoop<Client>.sessionUpdate(for: event) else { continue }
                 try await client.sessionUpdate(SessionNotification(sessionId: sessionId, update: update))

@@ -139,7 +139,7 @@ public actor RouterHostAgent<Client: AgentCapableClient> where Client.Model: Sen
 
         // ルーティング文脈として履歴を保持（公式も transfer 後のサブエージェントイベントが
         // orchestrator セッションに残る）。次ターンの転送先判断が会話の流れを参照できる。
-        history.append(.user(Self.historyText(for: parts)))
+        history.append(try Self.userMessage(for: parts))
         let workerText = workerTexts.joined(separator: "\n")
         history.append(.assistant("[\(target)] \(workerText.isEmpty ? "(no text)" : workerText)"))
     }
@@ -181,7 +181,7 @@ public actor RouterHostAgent<Client: AgentCapableClient> where Client.Model: Sen
     private func decideRoute(for parts: [Part]) async throws -> (agent: String, usage: TokenUsage) {
         let roster = await registry.rosterJSONLines()
         let response = try await client.planToolCalls(
-            messages: history + [.user(Self.historyText(for: parts))],
+            messages: history + [try Self.userMessage(for: parts)],
             model: model,
             tools: ToolSet { TransferToAgentTool() },
             toolChoice: .tool("transfer_to_agent"),
@@ -212,6 +212,12 @@ public actor RouterHostAgent<Client: AgentCapableClient> where Client.Model: Sen
         case .message(let message):
             message.parts
         }
+    }
+
+    /// パーツを LLM 入力 `LLMMessage` へ。画像（`.bytes` + image/*）を貫通させ、テキストのみなら
+    /// `historyText` と同一テキストの `.user(String)` を返す（ルーティング挙動の回帰なし）。
+    private static func userMessage(for parts: [Part]) throws -> LLMMessage {
+        try MultimodalInput.userMessage(from: parts)
     }
 
     /// パーツを LLM 文脈用テキストへ。テキストは逐語、構造化データはパートごと JSON 化
