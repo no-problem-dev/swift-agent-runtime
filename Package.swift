@@ -14,6 +14,7 @@ let package = Package(
         .library(name: "AgentRuntime", targets: ["AgentRuntime"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.4.0"),
         // A2A プロトコル（client + server + in-process）。エージェント間の契約
         .package(url: "https://github.com/no-problem-dev/swift-a2a.git", from: "0.6.2"),
         // LLM プロバイダ抽象・Tool・SystemPrompt（ループは持たない＝ランタイムが自前実装）。
