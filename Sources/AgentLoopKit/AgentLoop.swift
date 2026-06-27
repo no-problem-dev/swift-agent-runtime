@@ -183,6 +183,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         return messages
     }
 
+    /// `run(messages:onEvent:)` のストリーミングラッパー。イベントを `AsyncThrowingStream` で返す。
+    /// ストリームのキャンセルは内部 Task に伝播し、親タスクのキャンセルも継承する。
     public func events(messages: [LLMMessage]) -> AsyncThrowingStream<Event, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {

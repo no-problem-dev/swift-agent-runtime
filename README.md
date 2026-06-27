@@ -45,7 +45,6 @@ AgentConnectionRegistry  →  Workers (LLMAgentExecutor)
 | `UsageAccumulator` | ターン内トークン使用量の逐次集約器 |
 | `InteractiveRuntimeTool` | 呼ばれるとループを中断して `inputRequired` を発するマーカープロトコル |
 | `RequestUserInputTool` | 標準の対話ツール（`request_user_input`） |
-| `ACPToolMapping` | ツール名 → ACP `ToolKind` / タイトルのヒューリスティック変換 |
 
 ### AgentRuntime の主な型
 
@@ -205,7 +204,7 @@ let router = RouterHostAgent(
     )
 )
 
-for try await event in router.send([Part.text("この画像を解析して")]) {
+for try await event in await router.send([Part.text("この画像を解析して")]) {
     switch event {
     case .routed(let agent, let deterministic, _):
         print("routed to \(agent) (deterministic=\(deterministic))")

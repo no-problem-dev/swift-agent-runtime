@@ -70,10 +70,10 @@ public extension AgentLoop {
 /// raw tool input into a `JSONValue`. Heuristic and name-based so it works for
 /// any agent's tools (host delegation tools and worker tools alike) without a
 /// per-tool registry.
-public enum ACPToolMapping {
+enum ACPToolMapping {
     /// Tool name → ACP `ToolKind` so clients can pick an icon. Unknown names
     /// fall back to `.other`.
-    public static func kind(forToolNamed name: String) -> ToolKind {
+    static func kind(forToolNamed name: String) -> ToolKind {
         let n = name.lowercased()
         // Sub-agent delegation: an opaque sub-agent invocation reads as "agent
         // reasoning" to the client (ACP has no dedicated delegate kind).
@@ -92,7 +92,7 @@ public enum ACPToolMapping {
 
     /// Tool name → a human-readable `title` (e.g. `send_message` → "Send message").
     /// Clients may further localize; this keeps a sensible default on the wire.
-    public static func title(forToolNamed name: String) -> String {
+    static func title(forToolNamed name: String) -> String {
         let spaced = name.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
         guard let first = spaced.first else { return name }
         return first.uppercased() + spaced.dropFirst()
@@ -100,7 +100,7 @@ public enum ACPToolMapping {
 
     /// Decode raw tool-call input (JSON `Data`) into an ACP `JSONValue`.
     /// Returns `nil` when the input is empty or not valid JSON.
-    public static func jsonValue(from input: Data) -> JSONValue? {
+    static func jsonValue(from input: Data) -> JSONValue? {
         guard !input.isEmpty else { return nil }
         return try? JSONDecoder().decode(JSONValue.self, from: input)
     }

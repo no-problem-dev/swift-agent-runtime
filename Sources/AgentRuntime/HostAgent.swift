@@ -59,8 +59,10 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         self.cachePolicy = cachePolicy
     }
 
+    /// 現在の会話履歴（tool call / tool result を含む全トランスクリプト）。
     public var messages: [LLMMessage] { history }
 
+    /// 会話履歴をリセットする。次の `run` / `stream` は新規セッションとして開始する。
     public func clear() {
         history.removeAll()
     }
@@ -70,6 +72,7 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         history = messages
     }
 
+    /// テキスト入力を受け取り、最終 assistant 応答を返す（`LLMMessage` 版の便宜オーバーロード）。
     public func run(_ userInput: String) async throws -> String {
         try await run(.user(userInput))
     }
@@ -122,6 +125,7 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         }
     }
 
+    /// テキスト入力をストリームで受け取る便宜オーバーロード（`LLMMessage` 版の糖衣）。
     public func stream(_ userInput: String, telemetry: AgentTelemetrySink? = nil) -> AsyncThrowingStream<AgentLoop<Client>.Event, Error> {
         stream(.user(userInput), telemetry: telemetry)
     }

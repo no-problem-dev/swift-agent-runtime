@@ -11,7 +11,7 @@ public struct AgentDescriptor: Sendable, Codable, Hashable {
 }
 
 public struct AgentSendOutcome: Sendable {
-    public let agentName: String
+    public let name: String
     public let text: String
     /// `nil` は Message 応答（タスク無し）。
     public let state: TaskState?
@@ -22,7 +22,7 @@ public struct AgentSendOutcome: Sendable {
 /// 非ブロッキング委譲（A2A `returnImmediately`）の即時ハンドル。
 /// ワーカーはサーバ側でバックグラウンド実行を継続し、後で `checkTask` / `listRunningTasks` で確認する。
 public struct AgentTaskHandle: Sendable {
-    public let agentName: String
+    public let name: String
     /// 生成されたタスク ID。ワーカーが Message を即返した場合（タスク無し）は `nil`。
     public let taskId: TaskID?
     public let contextId: ContextID?
@@ -60,7 +60,7 @@ public struct BackgroundDelivery: Sendable, Equatable {
 
 /// 進行中／完了タスクのスナップショット（`checkTask` / `listRunningTasks` の戻り値）。
 public struct AgentTaskStatus: Sendable {
-    public let agentName: String
+    public let name: String
     public let taskId: TaskID
     public let state: TaskState
     /// artifact ＋（終端/中断時の）status メッセージを集約したテキスト。
@@ -130,10 +130,12 @@ public actor AgentConnectionRegistry {
         self.defaultDelivery = defaultDelivery
     }
 
+    /// `A2AClient` を直接指定してワーカーを登録する（リモート接続向け）。
     public func register(card: AgentCard, client: A2AClient) {
         connections[card.name] = Connection(card: card, client: client)
     }
 
+    /// in-process `RequestHandler` からワーカーを登録する。
     public func register(card: AgentCard, handler: any RequestHandler) {
         register(card: card, client: A2AClient.inProcess(handler: handler))
     }
@@ -149,6 +151,7 @@ public actor AgentConnectionRegistry {
         register(card: card, handler: handler)
     }
 
+    /// 登録済みワーカーの名前と説明を昇順ソートで返す。
     public func descriptors() -> [AgentDescriptor] {
         connections.values
             .map { AgentDescriptor(name: $0.card.name, description: $0.card.description) }
@@ -246,7 +249,7 @@ public actor AgentConnectionRegistry {
 
         if let usage { await usageObserver?(delegationId, name, usage) }
         await observer?(.finished(id: delegationId, agent: name, text: aggregated, state: finalState))
-        return AgentSendOutcome(agentName: name, text: aggregated, state: finalState, usage: usage)
+        return AgentSendOutcome(name: name, text: aggregated, state: finalState, usage: usage)
     }
 
     /// パーツ保存版の委譲（公式 A2UI orchestrator のパススルー転送相当）。
@@ -256,7 +259,7 @@ public actor AgentConnectionRegistry {
     /// 生で流す。消費側（ルーター）がイベントからパーツを取り出してクライアントへ
     /// パススルーする。`taskId` / `contextId` / `activeAgent` の管理と observer への
     /// 進捗通知は `send(to:text:)` と同じ。
-    public func sendStream(
+    public func stream(
         to name: String,
         parts: [Part],
         metadata: A2AMetadata? = nil
@@ -406,10 +409,10 @@ public actor AgentConnectionRegistry {
                 }
                 // push は監視ループ無し（ワーカーの InProcess push sender が ingestPush へ届ける）。
                 delegatedTasks[task.id]?.monitors = monitors
-                return AgentTaskHandle(agentName: name, taskId: task.id, contextId: task.contextId, state: task.status.state, immediateText: "")
+                return AgentTaskHandle(name: name, taskId: task.id, contextId: task.contextId, state: task.status.state, immediateText: "")
             case .message(let agentMessage):
                 await observer?(.finished(id: delegationId, agent: name, text: agentMessage.text, state: nil))
-                return AgentTaskHandle(agentName: name, taskId: nil, contextId: connection.contextId, state: nil, immediateText: agentMessage.text)
+                return AgentTaskHandle(name: name, taskId: nil, contextId: connection.contextId, state: nil, immediateText: agentMessage.text)
             }
         } catch {
             await observer?(.failed(id: delegationId, agent: name, error: "\(error)"))
@@ -534,7 +537,7 @@ public actor AgentConnectionRegistry {
             if task.status.state.isTerminal { continue }
             result.append(Self.status(of: task, agent: tracked.agentName))
         }
-        return result.sorted { $0.agentName < $1.agentName }
+        return result.sorted { $0.name < $1.name }
     }
 
     private static func status(of task: A2ATask, agent name: String) -> AgentTaskStatus {
@@ -547,7 +550,7 @@ public actor AgentConnectionRegistry {
             if !text.isEmpty { pieces.append(text) }
         }
         let usage = task.artifacts.lazy.compactMap { UsageMetadata.decode($0.metadata) }.first
-        return AgentTaskStatus(agentName: name, taskId: task.id, state: task.status.state, text: pieces.joined(separator: "\n"), usage: usage)
+        return AgentTaskStatus(name: name, taskId: task.id, state: task.status.state, text: pieces.joined(separator: "\n"), usage: usage)
     }
 
     /// エージェントの進行中タスクを A2A `cancelTask` でキャンセル（best-effort）。
@@ -569,6 +572,7 @@ public actor AgentConnectionRegistry {
         return lastState
     }
 
+    /// 登録済み全エージェントの前景・背景タスクをキャンセルする（best-effort）。
     public func cancelAll() async {
         for name in connections.keys {
             _ = await cancel(name)

@@ -70,16 +70,20 @@ public actor RouterHostAgent<Client: AgentCapableClient> where Client.Model: Sen
         self.cachePolicy = cachePolicy
     }
 
+    /// 現在のルーティング会話履歴（ユーザー入力とワーカー応答の要約を含む）。
     public var messages: [LLMMessage] { history }
 
+    /// ルーティング会話履歴をリセットする。次の `send` は新規セッションとして開始する。
     public func clear() {
         history.removeAll()
     }
 
+    /// 進行中の委譲タスクをキャンセルする。
     public func cancel() async {
         await registry.cancelAll()
     }
 
+    /// セッション終了処理。明示プロンプトキャッシュを保持するクライアントのキャッシュを解放する。
     public func close() async {
         if let releasing = client as? PromptCacheReleasing {
             await releasing.releasePromptCaches()
@@ -124,7 +128,7 @@ public actor RouterHostAgent<Client: AgentCapableClient> where Client.Model: Sen
         yield(.routed(agent: target, deterministic: deterministic, usage: routingUsage))
 
         let outbound = try await hooks.prepareOutbound(metadata, target)
-        let stream = try await registry.sendStream(to: target, parts: parts, metadata: outbound)
+        let stream = try await registry.stream(to: target, parts: parts, metadata: outbound)
 
         var workerTexts: [String] = []
         for try await event in stream {

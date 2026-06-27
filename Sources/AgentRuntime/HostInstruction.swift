@@ -6,12 +6,12 @@ import Foundation
 /// 非同期タスクモデル（`returnImmediately` + `tasks/get`）に基づくバックグラウンド委譲の
 /// 語彙を加え、ホストが提供する全ツールを一貫して記述する。可変部は登録エージェント一覧
 /// `agents`（1 行 1 JSON）と現在エージェント `activeAgent`。
-public enum HostInstruction {
+enum HostInstruction {
     /// ホストの system prompt 本文を返す。
     /// - Parameters:
     ///   - agents: 登録エージェント（`{name, description}` を 1 行 1 JSON）。
     ///   - activeAgent: 継続中の委譲先（なければ `"None"`）。
-    public static func root(agents: String, activeAgent: String) -> String {
+    static func root(agents: String, activeAgent: String) -> String {
         """
         You are an expert delegator that can delegate the user request to the
         appropriate remote agents.
@@ -47,7 +47,7 @@ public enum HostInstruction {
     /// それらのツールも提供されない。委譲語彙を残すと、特に小型のオンデバイスモデルが
     /// 存在しない委譲ツールを探して反射的に呼ぼうとし、ツール選択と出力品質が劣化する。
     /// そのため空フリート時は委譲を一切示唆しない素の指示へ切り替える。
-    public static func solo() -> String {
+    static func solo() -> String {
         """
         You are a capable assistant. Answer the user's request directly and concisely.
 

@@ -62,17 +62,17 @@ public struct SendMessageTool: Tool {
 
         switch outcome.state {
         case .failed:
-            return .error("Agent \(outcome.agentName) failed: \(outcome.text)")
+            return .error("Agent \(outcome.name) failed: \(outcome.text)")
         case .canceled, .rejected:
-            return .error("Agent \(outcome.agentName) did not complete (\(outcome.state?.rawValue ?? "")): \(outcome.text)")
+            return .error("Agent \(outcome.name) did not complete (\(outcome.state?.rawValue ?? "")): \(outcome.text)")
         case .inputRequired, .authRequired:
             let question = outcome.text.isEmpty ? "(no prompt provided)" : outcome.text
-            return .text("Agent \(outcome.agentName) needs more input before it can continue. "
+            return .text("Agent \(outcome.name) needs more input before it can continue. "
                 + "Ask the user: \(question)")
         default:
             if outcome.text.isEmpty {
                 let stateLabel = outcome.state.map { $0.rawValue } ?? "ok"
-                return .text("Agent \(outcome.agentName) responded (\(stateLabel)) with no text.")
+                return .text("Agent \(outcome.name) responded (\(stateLabel)) with no text.")
             }
             return .text(outcome.text)
         }
@@ -118,11 +118,11 @@ public struct DelegateAsyncTool: Tool {
         guard let taskId = handle.taskId else {
             // ワーカーがタスクを作らず Message を即返した（同期完了）。
             return .text(handle.immediateText.isEmpty
-                ? "Agent \(handle.agentName) responded immediately with no text."
+                ? "Agent \(handle.name) responded immediately with no text."
                 : handle.immediateText)
         }
         let state = handle.state?.rawValue ?? "submitted"
-        return .text("Started agent \(handle.agentName) in the background. "
+        return .text("Started agent \(handle.name) in the background. "
             + "task_id=\(taskId.rawValue), state=\(state). "
             + "It keeps running; use check_task with this task_id to get its result, or list_running_tasks to see all in-flight tasks.")
     }
@@ -155,16 +155,16 @@ public struct CheckTaskTool: Tool {
         let status = try await registry.checkTask(TaskID(arguments.task_id))
         switch status.state {
         case .failed:
-            return .error("Task \(status.taskId.rawValue) (\(status.agentName)) failed: \(status.text)")
+            return .error("Task \(status.taskId.rawValue) (\(status.name)) failed: \(status.text)")
         case .canceled, .rejected:
-            return .error("Task \(status.taskId.rawValue) (\(status.agentName)) did not complete (\(status.state.rawValue)): \(status.text)")
+            return .error("Task \(status.taskId.rawValue) (\(status.name)) did not complete (\(status.state.rawValue)): \(status.text)")
         case .inputRequired, .authRequired:
             let question = status.text.isEmpty ? "(no prompt provided)" : status.text
-            return .text("Agent \(status.agentName) needs more input before it can continue. Ask the user: \(question)")
+            return .text("Agent \(status.name) needs more input before it can continue. Ask the user: \(question)")
         case .completed:
-            return .text(status.text.isEmpty ? "Agent \(status.agentName) completed with no text." : status.text)
+            return .text(status.text.isEmpty ? "Agent \(status.name) completed with no text." : status.text)
         default:
-            return .text("Task \(status.taskId.rawValue) (\(status.agentName)) is still \(status.state.rawValue). Check again later.")
+            return .text("Task \(status.taskId.rawValue) (\(status.name)) is still \(status.state.rawValue). Check again later.")
         }
     }
 }
@@ -194,7 +194,7 @@ public struct ListRunningTasksTool: Tool {
 
     public func execute(with argumentsData: Data) async throws -> ToolResult {
         let running = await registry.listRunningTasks()
-        let payload = running.map { RunningTask(agent_name: $0.agentName, task_id: $0.taskId.rawValue, state: $0.state.rawValue) }
+        let payload = running.map { RunningTask(agent_name: $0.name, task_id: $0.taskId.rawValue, state: $0.state.rawValue) }
         let data = try JSONEncoder().encode(payload)
         return .json(data)
     }

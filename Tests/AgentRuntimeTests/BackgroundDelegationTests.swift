@@ -94,7 +94,7 @@ struct BackgroundDelegationTests {
 
         // gate 解放前は確実に実行中（決定論的）。
         let running = await registry.listRunningTasks()
-        #expect(running.contains { $0.agentName == "researcher" && $0.taskId == taskId })
+        #expect(running.contains { $0.name == "researcher" && $0.taskId == taskId })
 
         // 解放して完了させると一覧から消える。
         await gate.release()

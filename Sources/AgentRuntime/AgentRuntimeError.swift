@@ -1,6 +1,8 @@
 import Foundation
 
+/// AgentRuntime が発するエラー。`AgentConnectionRegistry`・`HostAgent`・`RouterHostAgent` の操作で throw される。
 public enum AgentRuntimeError: Error, Sendable, Equatable, LocalizedError {
+    /// 指定した名前のエージェントが `AgentConnectionRegistry` に登録されていない。
     case unknownAgent(String)
     /// ルーター型ホストで転送先を決定できなかった（transfer_to_agent 呼び出し欠落・引数不正）。
     case routingFailed(String)

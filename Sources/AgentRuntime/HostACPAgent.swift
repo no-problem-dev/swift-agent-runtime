@@ -5,8 +5,11 @@ import AgentLoopKit
 import LLMClient
 import Foundation
 
+/// `HostACPAgent` が発するエラー。
 public enum HostACPAgentError: Error, Sendable {
+    /// `prompt` / `cancel` 等の操作で、指定した `SessionId` に対応するセッションが見つからなかった。
     case unknownSession(SessionId)
+    /// 対応していない ACP 拡張メソッド（`ext`）が呼ばれた。
     case unsupported(String)
 }
 

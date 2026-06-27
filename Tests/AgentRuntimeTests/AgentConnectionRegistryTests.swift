@@ -56,7 +56,7 @@ struct AgentConnectionRegistryTests {
     func sendDrivesWorker() async throws {
         let registry = await makeRegistryWithTwoWorkers()
         let outcome = try await registry.send(to: "beta", text: "do it")
-        #expect(outcome.agentName == "beta")
+        #expect(outcome.name == "beta")
         #expect(outcome.state == .completed)
         #expect(outcome.text == "beta reply")
     }
