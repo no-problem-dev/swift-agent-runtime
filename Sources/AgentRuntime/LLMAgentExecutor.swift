@@ -22,6 +22,19 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
     /// マルチターンを継続し、A2A タスク履歴からのテキスト復元を行わない。
     private let historyStore: (any AgentHistoryStore)?
 
+    /// `LLMAgentExecutor` を初期化する。
+    ///
+    /// - Parameters:
+    ///   - client: LLM クライアント（`AgentCapableClient`）。
+    ///   - model: 使用モデル。
+    ///   - tools: 利用可能なツール群。デフォルトは空。
+    ///   - systemPrompt: システムプロンプト。`nil` の場合は日付コンテキストのみ前置する。
+    ///   - maxSteps: ループの最大ステップ数。デフォルト 12。
+    ///   - artifactName: A2A artifact 識別子。完了時に `addArtifact` へ渡す名前。デフォルト `"response"`。
+    ///   - maxTokens: LLM への最大出力トークン数。`nil` でモデルのデフォルト上限を使用する。
+    ///   - cachePolicy: system prompt + tools のプロンプトキャッシュ方針。デフォルト `.implicit`。
+    ///   - onSystemPrompt: ループが実際にレンダリングした system prompt（ツール同伴指示込み）の観測フック。デバッグ・計測向け。`nil` で観測なし。
+    ///   - historyStore: LLM 会話履歴ストア。指定するとネイティブ transcript（tool call/result 込み）でマルチターンを継続し、A2A タスク履歴からのテキスト復元を行わない。`nil` でタスク履歴から復元。
     public init(
         client: Client,
         model: Client.Model,

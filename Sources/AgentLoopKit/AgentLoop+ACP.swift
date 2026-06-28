@@ -2,21 +2,19 @@ import Foundation
 import ACPCore
 import LLMClient
 
-/// The agent loop projected onto ACP's `session/update` vocabulary.
+/// ACP の `session/update` 語彙に射影したエージェントループ拡張。
 ///
-/// `session/update` is the standard, testable surface every agent step is
-/// reported through, and it is intended to be the **single source of truth** a
-/// client renders from. This projection maps the loop's *semantic* events:
-/// thoughts, tool calls (with `kind`, `rawInput`, and a human-readable `title`),
-/// their results (`content` + `rawOutput`), and messages — preserving tool-call
-/// ids so updates correlate.
+/// `session/update` は全エージェントステップを報告する標準的なテスト可能面であり、
+/// クライアントが描画の唯一の情報源として使う想定。
+/// ループの意味論イベント — thought・ツール呼び出し（`kind`・`rawInput`・可読 `title`）・
+/// その結果（`content` + `rawOutput`）・message — を射影し、
+/// ツール呼び出し ID を保持して更新を相関付ける。
 ///
-/// Cost is **not** a semantic event here (see `AgentEvent`/`AgentTelemetry`):
-/// per-step token usage flows on the `AgentTelemetry` metrics sink. Its ACP
-/// counterpart, `usage_update`, is projected from that telemetry at the ACP
-/// boundary (`HostACPAgent`), not from this event vocabulary — keeping the
-/// semantic stream free of metrics. The rendered system prompt is no longer
-/// emitted at all.
+/// コストは意味論イベントではない（`AgentEvent`/`AgentTelemetry` 参照）:
+/// ステップごとのトークン使用量は `AgentTelemetry` metrics sink へ流れる。
+/// ACP 対応物の `usage_update` は ACP 境界（`HostACPAgent`）で telemetry から射影され、
+/// このイベント語彙からは射影しない — 意味論ストリームを metrics から切り離すため。
+/// レンダリング済み system prompt は一切発行しない。
 public extension AgentLoop {
     static func sessionUpdate(for event: Event) -> SessionUpdate? {
         switch event {
@@ -44,9 +42,8 @@ public extension AgentLoop {
         }
     }
 
-    /// The loop's progress as a stream of ACP `session/update`s. This is the
-    /// ACP-native surface; `run(messages:onEvent:)` remains the rich internal
-    /// projection that also carries telemetry (usage breakdown).
+    /// ループの進捗を ACP `session/update` のストリームとして返す。
+    /// ACP ネイティブな面。`run(messages:onEvent:)` は telemetry（usage 内訳）も運ぶ詳細な内部射影として残る。
     func updates(messages: [LLMMessage]) -> AsyncThrowingStream<SessionUpdate, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -66,13 +63,11 @@ public extension AgentLoop {
     }
 }
 
-/// Maps tool names to ACP `tool_call` presentation (kind + title) and decodes
-/// raw tool input into a `JSONValue`. Heuristic and name-based so it works for
-/// any agent's tools (host delegation tools and worker tools alike) without a
-/// per-tool registry.
+/// ツール名を ACP `tool_call` の表示情報（kind + title）にマップし、生ツール入力を `JSONValue` にデコードする。
+/// 名前ベースのヒューリスティックで動くため、ツールごとのレジストリなしに
+/// ホスト委譲ツールもワーカーツールも扱える。
 enum ACPToolMapping {
-    /// Tool name → ACP `ToolKind` so clients can pick an icon. Unknown names
-    /// fall back to `.other`.
+    /// ツール名 → ACP `ToolKind`。クライアントがアイコンを選ぶ用。未知の名前は `.other` にフォールバック。
     static func kind(forToolNamed name: String) -> ToolKind {
         let n = name.lowercased()
         // Sub-agent delegation: an opaque sub-agent invocation reads as "agent
@@ -90,16 +85,16 @@ enum ACPToolMapping {
         return .other
     }
 
-    /// Tool name → a human-readable `title` (e.g. `send_message` → "Send message").
-    /// Clients may further localize; this keeps a sensible default on the wire.
+    /// ツール名 → 可読な `title`（例: `send_message` → "Send message"）。
+    /// クライアントが独自にローカライズ可能。ワイヤ上のデフォルトとして妥当な値を提供する。
     static func title(forToolNamed name: String) -> String {
         let spaced = name.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
         guard let first = spaced.first else { return name }
         return first.uppercased() + spaced.dropFirst()
     }
 
-    /// Decode raw tool-call input (JSON `Data`) into an ACP `JSONValue`.
-    /// Returns `nil` when the input is empty or not valid JSON.
+    /// 生ツール呼び出し入力（JSON `Data`）を ACP `JSONValue` にデコードする。
+    /// 入力が空か JSON として不正な場合は `nil` を返す。
     static func jsonValue(from input: Data) -> JSONValue? {
         guard !input.isEmpty else { return nil }
         return try? JSONDecoder().decode(JSONValue.self, from: input)

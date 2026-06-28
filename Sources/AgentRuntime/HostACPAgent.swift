@@ -36,6 +36,12 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
     }
     private var sessions: [SessionId: Session] = [:]
 
+    /// `HostACPAgent` を初期化する。
+    ///
+    /// - Parameters:
+    ///   - client: ACP クライアント。`session/update` の送信（ストリーム射影・usage 通知）に使用する。
+    ///   - telemetry: usage / system prompt 等の観測フック。`nil` で観測なし。
+    ///   - makeHost: `HostAgent` のファクトリ。`@escaping @Sendable` クロージャで、`newSession` と `loadSession` のたびに呼ばれてセッション単位で独立したインスタンスを生成する。
     public init(
         client: any ACPClient,
         telemetry: AgentTelemetrySink? = nil,

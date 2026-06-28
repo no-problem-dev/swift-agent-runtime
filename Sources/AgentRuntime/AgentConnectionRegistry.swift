@@ -5,11 +5,13 @@ import A2AInProcess
 import LLMClient
 import Foundation
 
+/// ワーカーの識別名と説明を束ねる値型。`AgentConnectionRegistry.descriptors()` の要素として返され、`list_remote_agents` ツールや LLM の root instruction に差し込まれる。
 public struct AgentDescriptor: Sendable, Codable, Hashable {
     public let name: String
     public let description: String
 }
 
+/// `send(to:text:)` 完了後のブロッキング委譲結果。artifact テキスト・終端状態・usage をまとめる。
 public struct AgentSendOutcome: Sendable {
     public let name: String
     public let text: String
@@ -60,11 +62,15 @@ public struct BackgroundDelivery: Sendable, Equatable {
 
 /// 進行中／完了タスクのスナップショット（`checkTask` / `listRunningTasks` の戻り値）。
 public struct AgentTaskStatus: Sendable {
+    /// ワーカー名。
     public let name: String
+    /// A2A タスク ID。
     public let taskId: TaskID
+    /// タスクの現在状態。
     public let state: TaskState
-    /// artifact ＋（終端/中断時の）status メッセージを集約したテキスト。
+    /// artifact と（終端/中断時の）status メッセージを連結した集約テキスト。ホストの LLM が `check_task` の返答として参照する。
     public let text: String
+    /// artifact metadata から取得したトークン使用量。usage が記録されていなければ `nil`。
     public let usage: TokenUsage?
 }
 
@@ -95,13 +101,11 @@ public actor AgentConnectionRegistry {
     /// 委譲セッションが継続中か（公式 `session_active`）。終端状態で false。
     private var sessionActive = false
 
-    /// 非ブロッキング委譲したタスク（taskId -> 所有ワーカー＋直近スナップショット）。
-    /// 終端後も保持する（`check_task` で完了後の成果物を取得できるようにするため）。
-    /// snapshot は returnImmediately の即時応答を保持し、getTask が永続化に追いつく前の
-    /// 取りこぼし（404）を防ぐフォールバックに使う。
-    /// ワーカー handler に渡す in-process push sender（完了イベントを registry の `ingestPush` へ届ける）。
-    /// デモなど client 直接登録の場合も、`makePushSender()` ＋ ワーカーごとの `InMemoryPushNotificationConfigStore`
-    /// を handler に渡せば `.push` 配信が有効になる。
+    /// ワーカー handler に渡す in-process push sender を生成する。
+    ///
+    /// 生成した sender を `DefaultRequestHandler` の `pushSender` に渡すと、ワーカーが完了した際に
+    /// `ingestPush` 経由で registry へ通知が届き、`.push` 配信が有効になる。
+    /// `register(card:executor:)` は自動的に呼ぶが、クライアントを直接登録する場合は手動で注入する。
     public func makePushSender() -> InProcessPushNotificationSender {
         InProcessPushNotificationSender { [weak self] event, config in
             await self?.ingestPush(event, config)
@@ -118,6 +122,10 @@ public actor AgentConnectionRegistry {
         /// 背景監視（subscribe / poll）の Task ハンドル群。cancel 時に全停止する（push は監視ループ無し）。
         var monitors: [Task<Void, Never>]
     }
+    // 非ブロッキング委譲したタスク（taskId -> 所有ワーカー＋直近スナップショット）。
+    // 終端後も保持する（check_task で完了後の成果物を取得できるようにするため）。
+    // snapshot は returnImmediately の即時応答を保持し、getTask が永続化に追いつく前の
+    // 取りこぼし（404）を防ぐフォールバックに使う。
     private var delegatedTasks: [TaskID: TrackedTask] = [:]
 
     /// root instruction に出す現在エージェント（継続中のみ名前、なければ `"None"`）。

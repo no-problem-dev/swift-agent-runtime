@@ -33,6 +33,20 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
     private var history: [LLMMessage] = []
     private var currentRun: Task<String, Error>?
 
+    /// `HostAgent` を初期化する。
+    ///
+    /// - Parameters:
+    ///   - client: LLM クライアント（`AgentCapableClient`）。
+    ///   - model: 使用モデル。
+    ///   - registry: ワーカー接続を管理するレジストリ。ワーカーが空の場合は委譲ツールを注入しない。
+    ///   - outputInstruction: 出力フォーマット等のアプリ固有指示。delegation 本文の後ろに別セクションとして付加する。`nil` で省略。
+    ///   - extraTools: 委譲ツール以外の追加ツール。デフォルトは空。
+    ///   - maxSteps: ホストループの最大ステップ数。デフォルト 12。
+    ///   - maxTokens: LLM への最大出力トークン数。`nil` でモデルのデフォルト上限を使用する。
+    ///   - outputValidator: 最終出力の検証フック。空配列を返せば有効、非空なら問題点（人間可読）を返す。`nil` で検証なし（デフォルト）。
+    ///   - correctivePrompt: 検証失敗時に LLM へ送る是正再プロンプトの組み立て関数。`nil` でデフォルト実装（問題点 + 元入力を列挙した英文）を使用する。
+    ///   - maxValidationRetries: 検証失敗時の最大リトライ回数。初回生成を含まない（`0` で計1試行、`1` で計2試行）。デフォルト 0。
+    ///   - cachePolicy: system prompt + tools の安定プレフィックスのキャッシュ方針。全ステップに適用される。
     public init(
         client: Client,
         model: Client.Model,

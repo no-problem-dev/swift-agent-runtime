@@ -31,6 +31,18 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     /// 側帯観測（systemPrompt/usage）の注入先。意味論イベントと混ぜない。
     private let telemetry: AgentTelemetrySink?
 
+    /// `AgentLoop` を初期化する。
+    ///
+    /// - Parameters:
+    ///   - client: LLM クライアント（`AgentCapableClient`）。
+    ///   - model: 使用モデル。
+    ///   - tools: 利用可能なツール群。デフォルトは空（ツールなし）。
+    ///   - systemPrompt: システムプロンプト。`nil` の場合は日付コンテキストのみ前置する。
+    ///   - maxSteps: ツール呼び出しを含むループの最大ステップ数。上限に達すると空 `completed` を発する。デフォルト 12。
+    ///   - parallelToolExecution: 複数ツール要求を並列実行するか。`true`（デフォルト）で子タスクで同時実行し、結果を呼び出し順に整列する。`false` で逐次実行（デバッグ向け）。
+    ///   - maxTokens: LLM への最大出力トークン数。`nil` でモデルのデフォルト上限を使用する。
+    ///   - cachePolicy: system prompt と tools の安定プレフィックスに対するプロンプトキャッシュ方針。全ステップに適用される。
+    ///   - telemetry: usage / system prompt 等の観測フック。意味論イベント（`Event`）とは別の側帯で受ける。`nil` で観測なし。
     public init(
         client: Client,
         model: Client.Model,
