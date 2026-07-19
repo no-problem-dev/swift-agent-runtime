@@ -1,5 +1,7 @@
 import Foundation
 import Testing
+import A2AServer
+import A2AInProcess
 @testable import AgentRuntime
 
 private enum SoloMockError: Error { case unused }

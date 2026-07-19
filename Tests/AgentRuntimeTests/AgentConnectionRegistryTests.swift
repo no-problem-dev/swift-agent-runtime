@@ -1,5 +1,7 @@
 import Foundation
 import Testing
+import A2AServer
+import A2AInProcess
 @testable import AgentRuntime
 
 // 共通のモック（LLMAgentExecutorTests と同じ方針: 固定テキストを返す）

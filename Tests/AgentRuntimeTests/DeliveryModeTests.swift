@@ -1,5 +1,7 @@
 import Foundation
 import Testing
+import A2AServer
+import A2AInProcess
 @testable import AgentRuntime
 
 /// startWork → working → 少し待って → artifact → complete（モード差を観測できる速度）。

@@ -1,5 +1,7 @@
 import Foundation
 import Testing
+import A2AServer
+import A2AInProcess
 @testable import AgentRuntime
 
 /// 手書きワーカー（langgraph サンプル同型）: 初回ターンは input-required で中断、

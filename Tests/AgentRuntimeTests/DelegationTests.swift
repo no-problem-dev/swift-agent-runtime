@@ -1,6 +1,8 @@
 import Foundation
 import Testing
 import AgentLoopKit
+import A2AServer
+import A2AInProcess
 @testable import AgentRuntime
 
 private enum MockError: Error { case unused }
