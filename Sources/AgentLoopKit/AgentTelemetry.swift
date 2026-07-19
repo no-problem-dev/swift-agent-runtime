@@ -17,11 +17,3 @@ public enum AgentTelemetry: Sendable {
 
 /// 側帯観測の注入シンク。`AgentLoop` / `HostAgent` の構築・実行時に注入する。
 public typealias AgentTelemetrySink = @Sendable (AgentTelemetry) async -> Void
-
-/// telemetry sink（@Sendable）越しに usage を集計するためのスレッドセーフな蓄積器。
-/// ワーカーが自分の総消費量を artifact metadata で呼び出し元へ返す等に使う。
-public actor UsageAccumulator {
-    public private(set) var total: TokenUsage?
-    public init() {}
-    public func add(_ usage: TokenUsage) { total = total?.adding(usage) ?? usage }
-}
