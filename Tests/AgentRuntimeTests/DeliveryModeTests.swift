@@ -10,7 +10,7 @@ private struct SlowExecutor: AgentExecutor {
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
         try await updater.startWork()
         try await Task.sleep(for: .milliseconds(30))
-        try await updater.updateStatus(.working, message: updater.newAgentMessage([.text("作業中")]))
+        try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text("作業中")]))
         try await Task.sleep(for: .milliseconds(30))
         await updater.addArtifact([.text("結果"), ], name: "result")
         try await updater.complete()

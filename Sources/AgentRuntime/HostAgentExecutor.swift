@@ -26,14 +26,14 @@ public actor HostAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         let host = hostFor(context.contextId)
         var finalText = ""
         do {
-            for try await event in await host.stream(context.getUserInput()) {
+            for try await event in await host.stream(context.userInput()) {
                 switch event {
                 case .thinking(let text):
                     if !text.isEmpty {
-                        try await updater.updateStatus(.working, message: updater.newAgentMessage([.text(text)]))
+                        try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text(text)]))
                     }
                 case .toolCall(_, let name, _):
-                    try await updater.updateStatus(.working, message: updater.newAgentMessage([.text("→ \(name)")]))
+                    try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text("→ \(name)")]))
                 case .completed(let text):
                     finalText = text
                 case .toolResult, .inputRequired:
@@ -45,7 +45,7 @@ public actor HostAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            try? await updater.failed(message: updater.newAgentMessage([.text("\(error)")]))
+            try? await updater.fail(message: updater.makeAgentMessage([.text("\(error)")]))
         }
     }
 

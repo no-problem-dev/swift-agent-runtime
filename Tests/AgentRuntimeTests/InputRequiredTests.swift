@@ -11,9 +11,9 @@ private struct PausingExecutor: AgentExecutor {
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
         if context.currentTask == nil {
             try await updater.startWork()
-            try await updater.requiresInput(message: updater.newAgentMessage([.text("Which city?")]))
+            try await updater.requiresInput(message: updater.makeAgentMessage([.text("Which city?")]))
         } else {
-            await updater.addArtifact([.text("Weather for \(context.getUserInput())")], name: "result")
+            await updater.addArtifact([.text("Weather for \(context.userInput())")], name: "result")
             try await updater.complete()
         }
     }

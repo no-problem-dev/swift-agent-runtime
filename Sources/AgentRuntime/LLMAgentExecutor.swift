@@ -90,14 +90,14 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                 switch event {
                 case .thinking(let text):
                     if !text.isEmpty {
-                        try await updater.updateStatus(.working, message: updater.newAgentMessage([.text(text)]))
+                        try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text(text)]))
                     }
                 case .toolCall(_, let name, _):
-                    try await updater.updateStatus(.working, message: updater.newAgentMessage([.text("🔧 \(name)")]))
+                    try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text("🔧 \(name)")]))
                 case .toolResult:
                     break
                 case .inputRequired(let question):
-                    try await updater.requiresInput(message: updater.newAgentMessage([.text(question)]))
+                    try await updater.requiresInput(message: updater.makeAgentMessage([.text(question)]))
                 case .completed(let text):
                     let total = await usage.total
                     await updater.addArtifact([.text(text)], name: artifactName, metadata: total.flatMap(UsageMetadata.encode))
@@ -108,7 +108,7 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            try? await updater.failed(message: updater.newAgentMessage([.text("\(error)")]))
+            try? await updater.fail(message: updater.makeAgentMessage([.text("\(error)")]))
         }
     }
 

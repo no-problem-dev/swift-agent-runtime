@@ -16,7 +16,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.4.0"),
         // A2A プロトコル（client + server + in-process）。エージェント間の契約
-        .package(url: "https://github.com/no-problem-dev/swift-a2a.git", from: "0.6.2"),
+        .package(url: "https://github.com/no-problem-dev/swift-a2a.git", from: "0.7.0"),
         // LLM プロバイダ抽象・Tool・SystemPrompt（ループは持たない＝ランタイムが自前実装）。
         // agent-step 契約は LLMAgentStep（3.5.1 で L0 から分離）から取り込む。
         .package(url: "https://github.com/no-problem-dev/swift-llm-client.git", from: "3.7.0"),

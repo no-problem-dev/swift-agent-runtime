@@ -16,7 +16,7 @@ private struct PausingExecutor: AgentExecutor {
     func execute(_ context: RequestContext, eventQueue: EventQueue) async throws {
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
         try await updater.startWork()
-        try await updater.requiresInput(message: updater.newAgentMessage([.text("need input")]))
+        try await updater.requiresInput(message: updater.makeAgentMessage([.text("need input")]))
     }
     func cancel(_ context: RequestContext, eventQueue: EventQueue) async throws {
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)

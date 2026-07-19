@@ -15,7 +15,7 @@ private struct SlowExecutor: AgentExecutor {
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
         try await updater.startWork()
         try await Task.sleep(for: .milliseconds(20))
-        try await updater.updateStatus(.working, message: updater.newAgentMessage([.text("作業中")]))
+        try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text("作業中")]))
         try await Task.sleep(for: .milliseconds(20))
         await updater.addArtifact([.text("結果")], name: "result")
         try await updater.complete()
@@ -35,7 +35,7 @@ private struct EchoExecutor: AgentExecutor {
         await counter.increment()
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
         try await updater.startWork()
-        await updater.addArtifact([.text("report:\(context.getUserInput())")], name: "result")
+        await updater.addArtifact([.text("report:\(context.userInput())")], name: "result")
         try await updater.complete()
     }
     func cancel(_ context: RequestContext, eventQueue: EventQueue) async throws {}
