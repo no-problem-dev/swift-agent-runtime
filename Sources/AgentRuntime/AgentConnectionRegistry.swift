@@ -127,6 +127,10 @@ public actor AgentConnectionRegistry {
     // snapshot は returnImmediately の即時応答を保持し、getTask が永続化に追いつく前の
     // 取りこぼし（404）を防ぐフォールバックに使う。
     private var delegatedTasks: [TaskID: TrackedTask] = [:]
+    // delegateAsync が sendMessage 応答を受けて追跡登録する前に届いた push イベントの一時保管
+    // （delegationId 別）。instant ワーカーは登録前に完了 push まで終えることがあり、
+    // ここで保留しないと push が silent drop されて `.pushOnly` 配信が届かない。
+    private var pendingPushes: [String: [StreamResponse]] = [:]
 
     /// root instruction に出す現在エージェント（継続中のみ名前、なければ `"None"`）。
     public var activeAgent: String { sessionActive ? (lastAgent ?? "None") : "None" }
@@ -389,6 +393,8 @@ public actor AgentConnectionRegistry {
         var configuration = SendMessageConfiguration(returnImmediately: true)
         if delivery.push {
             configuration.taskPushNotificationConfig = TaskPushNotificationConfig(url: "inprocess://delegation", token: delegationId)
+            // sendMessage の await 中（追跡登録前）に届く push を取りこぼさないよう保留枠を先に開ける。
+            pendingPushes[delegationId] = []
         }
         do {
             let response = try await connection.client.sendMessage(message, configuration: configuration)
@@ -417,12 +423,18 @@ public actor AgentConnectionRegistry {
                 }
                 // push は監視ループ無し（ワーカーの InProcess push sender が ingestPush へ届ける）。
                 delegatedTasks[task.id]?.monitors = monitors
+                // 登録前に保留した push を順に流し直す（instant ワーカーの完了通知を復元）。
+                for event in pendingPushes.removeValue(forKey: delegationId) ?? [] {
+                    await deliverPush(event, taskId: task.id)
+                }
                 return AgentTaskHandle(name: name, taskId: task.id, contextId: task.contextId, state: task.status.state, immediateText: "")
             case .message(let agentMessage):
+                pendingPushes[delegationId] = nil
                 await observer?(.finished(id: delegationId, agent: name, text: agentMessage.text, state: nil))
                 return AgentTaskHandle(name: name, taskId: nil, contextId: connection.contextId, state: nil, immediateText: agentMessage.text)
             }
         } catch {
+            pendingPushes[delegationId] = nil
             await observer?(.failed(id: delegationId, agent: name, error: "\(error)"))
             throw error
         }
@@ -473,9 +485,20 @@ public actor AgentConnectionRegistry {
     private func finalizeBackgroundTask(_ taskId: TaskID, alreadyStreamed: Bool) async {
         guard let tracked = delegatedTasks[taskId], !tracked.finished,
               let connection = connections[tracked.agentName] else { return }
-        let task = (try? await connection.client.getTask(taskId)) ?? tracked.snapshot
-        delegatedTasks[taskId]?.snapshot = task
+        // finished-once はここで**同期的に** claim する。getTask の await 中に push / poll が
+        // 割り込むと `.finished` が二重発火するため（check と set の間に suspension を挟まない）。
         delegatedTasks[taskId]?.finished = true
+        // queue の終了は「producer（executor）が返った」ことしか保証せず、終端状態の永続化
+        //（TaskManager.process）はまだ追いついていないことがある。非終端のまま finalize すると
+        // `.finished(state: .working)` を流して以後完了が永遠に届かなくなるため、
+        // 終端/中断が引けるまで短い間隔で追いかける（producer は終了済みなので短時間で確定する。上限付き）。
+        var task = (try? await connection.client.getTask(taskId)) ?? tracked.snapshot
+        for _ in 0..<200 where !(task.status.state.isTerminal || task.status.state.isInterrupted) {
+            if Task.isCancelled { break }
+            try? await Task.sleep(for: .milliseconds(10))
+            if let refreshed = try? await connection.client.getTask(taskId) { task = refreshed }
+        }
+        delegatedTasks[taskId]?.snapshot = task
         let status = Self.status(of: task, agent: tracked.agentName)
         // subscribe が流れなかった場合のみ、最終 task を一度描画（成果物のパートを side-channel へ）。
         if !alreadyStreamed {
@@ -517,10 +540,19 @@ public actor AgentConnectionRegistry {
 
     /// ワーカーが push した `StreamResponse` を受け、token(delegationId) で委譲を解決して observer へ流す。
     private func ingestPush(_ event: StreamResponse, _ config: TaskPushNotificationConfig) async {
-        guard let token = config.token,
-              let entry = delegatedTasks.first(where: { $0.value.delegationId == token }) else { return }
-        let taskId = entry.key
-        let tracked = entry.value
+        guard let token = config.token else { return }
+        guard let entry = delegatedTasks.first(where: { $0.value.delegationId == token }) else {
+            // delegateAsync が追跡登録を終える前（sendMessage の await 中）に届いた push。
+            // 保留枠があれば貯めておき、登録直後にドレインして配信する。
+            if pendingPushes[token] != nil { pendingPushes[token]?.append(event) }
+            return
+        }
+        await deliverPush(event, taskId: entry.key)
+    }
+
+    /// 解決済みタスクへの push イベント 1 件を observer へ配信し、終端なら finished-once を発火する。
+    private func deliverPush(_ event: StreamResponse, taskId: TaskID) async {
+        guard let tracked = delegatedTasks[taskId] else { return }
         if case .task(let task) = event { delegatedTasks[taskId]?.snapshot = task }
         await observer?(.progress(id: tracked.delegationId, agent: tracked.agentName, event))
         if let usage = Self.usage(of: event) {
