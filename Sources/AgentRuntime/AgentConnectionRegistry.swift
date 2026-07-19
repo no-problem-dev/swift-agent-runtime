@@ -208,7 +208,7 @@ public actor AgentConnectionRegistry {
 
         do {
             for try await event in connection.client.events(message, mode: mode) {
-                await observer?(.progress(id: delegationId, agent: name, event))
+                await observer?(.progress(id: delegationId, agent: name, response: event))
                 switch event {
                 case .task(let task):
                     connection.taskId = task.id
@@ -303,7 +303,7 @@ public actor AgentConnectionRegistry {
                 var finalState: TaskState?
                 do {
                     for try await event in client.events(message, mode: mode) {
-                        await observer?(.progress(id: delegationId, agent: name, event))
+                        await observer?(.progress(id: delegationId, agent: name, response: event))
                         await self.recordIdentifiers(from: event, for: name)
                         if let state = Self.taskState(of: event) { finalState = state }
                         if let usage = Self.usage(of: event) {
@@ -468,7 +468,7 @@ public actor AgentConnectionRegistry {
             for try await event in stream {
                 streamed = true
                 if case .task(let task) = event { delegatedTasks[taskId]?.snapshot = task }
-                await observer?(.progress(id: delegationId, agent: agent, event))
+                await observer?(.progress(id: delegationId, agent: agent, response: event))
                 if let usage = Self.usage(of: event) {
                     await usageObserver?(delegationId, agent, usage)
                 }
@@ -502,7 +502,7 @@ public actor AgentConnectionRegistry {
         let status = Self.status(of: task, agent: tracked.agentName)
         // subscribe が流れなかった場合のみ、最終 task を一度描画（成果物のパートを side-channel へ）。
         if !alreadyStreamed {
-            await observer?(.progress(id: tracked.delegationId, agent: tracked.agentName, .task(task)))
+            await observer?(.progress(id: tracked.delegationId, agent: tracked.agentName, response: .task(task)))
             if let usage = status.usage {
                 await usageObserver?(tracked.delegationId, tracked.agentName, usage)
             }
@@ -521,7 +521,7 @@ public actor AgentConnectionRegistry {
             do { try await Task.sleep(for: interval) } catch { return } // cancel
             guard let task = try? await connection.client.getTask(taskId) else { continue }
             delegatedTasks[taskId]?.snapshot = task
-            await observer?(.progress(id: delegationId, agent: agent, .task(task)))
+            await observer?(.progress(id: delegationId, agent: agent, response: .task(task)))
             if let usage = Self.usage(of: .task(task)) {
                 await usageObserver?(delegationId, agent, usage)
             }
@@ -554,7 +554,7 @@ public actor AgentConnectionRegistry {
     private func deliverPush(_ event: StreamResponse, taskId: TaskID) async {
         guard let tracked = delegatedTasks[taskId] else { return }
         if case .task(let task) = event { delegatedTasks[taskId]?.snapshot = task }
-        await observer?(.progress(id: tracked.delegationId, agent: tracked.agentName, event))
+        await observer?(.progress(id: tracked.delegationId, agent: tracked.agentName, response: event))
         if let usage = Self.usage(of: event) {
             await usageObserver?(tracked.delegationId, tracked.agentName, usage)
         }

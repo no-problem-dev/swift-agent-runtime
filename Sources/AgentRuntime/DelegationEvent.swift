@@ -14,7 +14,7 @@ public enum DelegationEvent: Sendable {
     /// 委譲を開始した。
     case started(id: String, agent: String, label: String)
     /// ワーカーの A2A ストリームイベント（status/artifact/message）。レーンのライブ更新用。
-    case progress(id: String, agent: String, StreamResponse)
+    case progress(id: String, agent: String, response: StreamResponse)
     /// 委譲が終端まで完了した（集約テキストと終端状態）。
     case finished(id: String, agent: String, text: String, state: TaskState?)
     /// 委譲が失敗した。
