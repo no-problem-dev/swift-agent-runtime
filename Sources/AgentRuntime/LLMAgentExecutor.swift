@@ -96,6 +96,9 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                     try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text("🔧 \(name)")]))
                 case .toolResult:
                     break
+                case .toolApprovalRequired(_, _, _, let request):
+                    // A2A の input-required へ写像(承認可否をテキストで尋ねる)
+                    try await updater.requiresInput(message: updater.makeAgentMessage([.text(request.summary)]))
                 case .inputRequired(let question):
                     try await updater.requiresInput(message: updater.makeAgentMessage([.text(question)]))
                 case .completed(let text):

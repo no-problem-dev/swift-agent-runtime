@@ -36,6 +36,9 @@ public actor HostAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                     try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text("→ \(name)")]))
                 case .completed(let text):
                     finalText = text
+                case .toolApprovalRequired(_, _, _, let request):
+                    // A2A ホスト実行には承認 UI がないため、要求内容を報告して中断扱いにする
+                    try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text(request.summary)]))
                 case .toolResult, .inputRequired:
                     break
                 }

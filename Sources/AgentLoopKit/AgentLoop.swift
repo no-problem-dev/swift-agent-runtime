@@ -16,6 +16,9 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         /// `input` はツール呼び出しの生引数（JSON）。ACP `tool_call.rawInput` へそのまま射影する。
         case toolCall(id: String, name: String, input: Data)
         case toolResult(id: String, name: String, output: String, isError: Bool)
+        /// 承認必須ツールの呼び出し。ループは実行せずに中断している。
+        /// ホストはユーザー裁定を集め、同じトランスクリプト + `pendingToolDecisions` で再開する。
+        case toolApprovalRequired(id: String, name: String, input: Data, request: ToolApprovalRequest)
         case inputRequired(question: String)
         case completed(text: String)
     }
@@ -79,8 +82,55 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     /// ループを実行し、ツール呼び出し・結果・最終 assistant 応答まで含む全トランスクリプトを返す。
     /// 返り値をそのまま次ターンの履歴に使うと、委譲とその結果が文脈として引き継がれる。
     @discardableResult
-    public func run(messages initial: [LLMMessage], onEvent: (Event) async throws -> Void) async throws -> [LLMMessage] {
+    public func run(
+        messages initial: [LLMMessage],
+        pendingToolDecisions: [String: ToolApprovalDecision] = [:],
+        onEvent: (Event) async throws -> Void
+    ) async throws -> [LLMMessage] {
         var messages = initial
+        // 承認中断からの再開: トランスクリプト末尾の未実行 toolUses を裁定に従って解決する。
+        // 承認済みは実行、拒否は辞退結果を合成、裁定対象外(同バッチの承認不要ツール)は通常実行。
+        // AG-UI の再開意味論に合わせ、承認済み呼び出しの .toolCall は再発行しない。
+        if !pendingToolDecisions.isEmpty,
+           let last = messages.last, last.role == .assistant {
+            let pendingUses: [(id: String, name: String, input: Data)] = last.contents.compactMap {
+                if case .toolUse(let id, let name, let input) = $0 { (id, name, input) } else { nil }
+            }
+            if !pendingUses.isEmpty {
+                var results: [(toolCallId: String, name: String, content: ToolResultContent)] = []
+                var turnEnded = false
+                for use in pendingUses {
+                    if pendingToolDecisions[use.id] == .denied {
+                        let payload = ToolApprovalDecision.deniedResultPayload
+                        results.append((toolCallId: use.id, name: use.name, content: .success(payload)))
+                        try await onEvent(.toolResult(id: use.id, name: use.name, output: payload, isError: false))
+                        continue
+                    }
+                    if pendingToolDecisions[use.id] == nil {
+                        try await onEvent(.toolCall(id: use.id, name: use.name, input: use.input))
+                    }
+                    let result: ToolResult
+                    do {
+                        result = try await tools.execute(toolNamed: use.name, with: use.input)
+                    } catch {
+                        result = .error("\(error)")
+                    }
+                    let content: ToolResultContent = result.isError
+                        ? .failure(result.stringValue)
+                        : .success(result.stringValue)
+                    results.append((toolCallId: use.id, name: use.name, content: content))
+                    try await onEvent(.toolResult(id: use.id, name: use.name, output: result.stringValue, isError: result.isError))
+                    if !result.isError, tools.tool(named: use.name) is any TurnEndingTool {
+                        turnEnded = true
+                    }
+                }
+                messages.append(.toolResults(results))
+                if turnEnded {
+                    try await onEvent(.completed(text: ""))
+                    return messages
+                }
+            }
+        }
         // 日付はターン（run）ごとに評価する — 長寿命セッションが日をまたいでも正しい。
         // ツール同伴指示（A2UI スキーマ等）は末尾へ後置（ADK process_llm_request 相当）。
         let groundedPrompt = SystemPrompt(
@@ -134,6 +184,29 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
             if let ask = toolUses.first(where: { tools.tool(named: $0.name) is any InteractiveRuntimeTool }),
                let interactive = tools.tool(named: ask.name) as? any InteractiveRuntimeTool {
                 try await onEvent(.inputRequired(question: interactive.question(from: ask.input)))
+                return messages
+            }
+
+            // 承認必須ツールを含むバッチは実行せず中断し、承認要求として返す
+            // （AG-UI interrupts / human-in-the-loop approvals へ写像）。
+            // 同バッチの承認不要ツールも実行しない — 部分実行状態を作らず、
+            // 再開時(resume pre-step)にまとめて解決する。
+            var approvals: [(id: String, name: String, input: Data, request: ToolApprovalRequest)] = []
+            for use in toolUses {
+                if let tool = tools.tool(named: use.name) as? any ApprovalRequiringTool,
+                   let request = await tool.approvalRequest(from: use.input) {
+                    approvals.append((use.id, use.name, use.input, request))
+                }
+            }
+            if !approvals.isEmpty {
+                for pending in approvals {
+                    try await onEvent(.toolApprovalRequired(
+                        id: pending.id,
+                        name: pending.name,
+                        input: pending.input,
+                        request: pending.request
+                    ))
+                }
                 return messages
             }
 
@@ -197,11 +270,14 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
 
     /// `run(messages:onEvent:)` のストリーミングラッパー。イベントを `AsyncThrowingStream` で返す。
     /// ストリームのキャンセルは内部 Task に伝播し、親タスクのキャンセルも継承する。
-    public func events(messages: [LLMMessage]) -> AsyncThrowingStream<Event, Error> {
+    public func events(
+        messages: [LLMMessage],
+        pendingToolDecisions: [String: ToolApprovalDecision] = [:]
+    ) -> AsyncThrowingStream<Event, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    try await run(messages: messages) { continuation.yield($0) }
+                    try await run(messages: messages, pendingToolDecisions: pendingToolDecisions) { continuation.yield($0) }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)

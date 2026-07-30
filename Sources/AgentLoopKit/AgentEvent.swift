@@ -12,6 +12,8 @@ public enum AgentEvent: Sendable {
     case thinking(String)
     case toolCall(id: String, name: String, input: Data)
     case toolResult(id: String, name: String, output: String, isError: Bool)
+    /// 承認必須ツールの呼び出し(ループは実行せずに中断している)。
+    case toolApprovalRequired(id: String, name: String, input: Data, request: ToolApprovalRequest)
     case inputRequired(question: String)
     case completed(text: String)
 }
@@ -24,6 +26,8 @@ extension AgentEvent {
         case .toolCall(let id, let name, let input): self = .toolCall(id: id, name: name, input: input)
         case .toolResult(let id, let name, let output, let isError):
             self = .toolResult(id: id, name: name, output: output, isError: isError)
+        case .toolApprovalRequired(let id, let name, let input, let request):
+            self = .toolApprovalRequired(id: id, name: name, input: input, request: request)
         case .inputRequired(let question): self = .inputRequired(question: question)
         case .completed(let text): self = .completed(text: text)
         }

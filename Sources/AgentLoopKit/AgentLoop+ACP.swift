@@ -35,6 +35,9 @@ public extension AgentLoop {
                 content: [.content(Content(content: .text(TextContent(text: output))))],
                 rawOutput: .string(output)
             ))
+        case let .toolApprovalRequired(_, _, _, request):
+            // ACP session/update に承認語彙はないため、要約を agent message として提示する。
+            return .agentMessageChunk(ContentChunk(content: .text(TextContent(text: request.summary))))
         case let .inputRequired(question):
             return .agentMessageChunk(ContentChunk(content: .text(TextContent(text: question))))
         case let .completed(text):
