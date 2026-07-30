@@ -122,7 +122,9 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                     }
                     let result: ToolResult
                     do {
-                        result = try await tools.execute(toolNamed: use.name, with: use.input)
+                        // TranscriptAwareTool には実行時点のメッセージ列を渡す
+                        // （末尾の未解決 toolUses メッセージの除去はツール側の責務）
+                        result = try await tools.execute(toolNamed: use.name, with: use.input, transcript: messages)
                     } catch {
                         result = .error("\(error)")
                     }
@@ -252,11 +254,13 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
             let executed: [ToolResult]
             if parallelToolExecution, toolUses.count > 1 {
                 let tools = self.tools
+                // TranscriptAwareTool には実行時点のメッセージ列を渡す（値渡し = 読み取り専用コピー）
+                let transcript = messages
                 executed = try await withThrowingTaskGroup(of: (Int, ToolResult).self) { group in
                     for (index, use) in toolUses.enumerated() {
                         group.addTask {
                             do {
-                                return (index, try await tools.execute(toolNamed: use.name, with: use.input))
+                                return (index, try await tools.execute(toolNamed: use.name, with: use.input, transcript: transcript))
                             } catch {
                                 return (index, .error("\(error)"))
                             }
@@ -270,7 +274,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 var sequential: [ToolResult] = []
                 for use in toolUses {
                     do {
-                        sequential.append(try await tools.execute(toolNamed: use.name, with: use.input))
+                        sequential.append(try await tools.execute(toolNamed: use.name, with: use.input, transcript: messages))
                     } catch {
                         sequential.append(.error("\(error)"))
                     }
