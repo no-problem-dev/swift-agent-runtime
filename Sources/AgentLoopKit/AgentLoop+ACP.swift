@@ -18,8 +18,12 @@ import LLMClient
 public extension AgentLoop {
     static func sessionUpdate(for event: Event) -> SessionUpdate? {
         switch event {
-        case let .thinking(text):
-            return .agentThoughtChunk(ContentChunk(content: .text(TextContent(text: text))))
+        case let .textDelta(delta):
+            // ACP のチャンクは増分が前提。テキストはデルタで届く契約（非ストリーミング
+            // プロバイダでも全文 1 デルタが保証される）なので、ここが唯一のテキスト射影。
+            return .agentMessageChunk(ContentChunk(content: .text(TextContent(text: delta))))
+        case let .thinkingDelta(delta):
+            return .agentThoughtChunk(ContentChunk(content: .text(TextContent(text: delta))))
         case let .toolCall(id, name, input):
             return .toolCall(ToolCall(
                 toolCallId: ToolCallId(id),
@@ -40,8 +44,10 @@ public extension AgentLoop {
             return .agentMessageChunk(ContentChunk(content: .text(TextContent(text: request.summary))))
         case let .inputRequired(question):
             return .agentMessageChunk(ContentChunk(content: .text(TextContent(text: question))))
-        case let .completed(text):
-            return text.isEmpty ? nil : .agentMessageChunk(ContentChunk(content: .text(TextContent(text: text))))
+        case .completed:
+            // テキストは textDelta が全量を運ぶ。completed はターン終端マーカーであり、
+            // ここで text を再射影すると二重表示になる。
+            return nil
         }
     }
 

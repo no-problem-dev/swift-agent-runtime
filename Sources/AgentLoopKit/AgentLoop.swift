@@ -12,7 +12,13 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     /// エージェントが**何をしているか**の意味論イベントのみ。コスト計測・デバッグ・検証制御は
     /// 持たない（それらは `AgentTelemetry` の sink へ流す）。
     public enum Event: Sendable {
-        case thinking(String)
+        /// アシスタントテキストの増分。表示はデルタを正とし、`completed` の `text` は
+        /// ターン終端の確定値（履歴・検証用）として扱う。非ストリーミングプロバイダでも
+        /// ステップ全文を 1 つのデルタとして必ず emit するため、消費側はデルタだけを
+        /// 見ればテキストを取りこぼさない。
+        case textDelta(String)
+        /// 思考テキストの増分（thinking 有効時のみ）。
+        case thinkingDelta(String)
         /// `input` はツール呼び出しの生引数（JSON）。ACP `tool_call.rawInput` へそのまま射影する。
         case toolCall(id: String, name: String, input: Data)
         case toolResult(id: String, name: String, output: String, isError: Bool)
@@ -31,6 +37,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     private let parallelToolExecution: Bool
     private let maxTokens: Int?
     private let cachePolicy: PromptCachePolicy
+    private let thinkingMode: ThinkingMode
     /// 側帯観測（systemPrompt/usage）の注入先。意味論イベントと混ぜない。
     private let telemetry: AgentTelemetrySink?
 
@@ -45,6 +52,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     ///   - parallelToolExecution: 複数ツール要求を並列実行するか。`true`（デフォルト）で子タスクで同時実行し、結果を呼び出し順に整列する。`false` で逐次実行（デバッグ向け）。
     ///   - maxTokens: LLM への最大出力トークン数。`nil` でモデルのデフォルト上限を使用する。
     ///   - cachePolicy: system prompt と tools の安定プレフィックスに対するプロンプトキャッシュ方針。全ステップに適用される。
+    ///   - thinkingMode: 拡張思考の設定。デフォルト `.disabled`（思考トークンのコストを発生させない）。
+    ///     ストリーミング可否とは独立で、`.disabled` でもテキストデルタは流れる。
     ///   - telemetry: usage / system prompt 等の観測フック。意味論イベント（`Event`）とは別の側帯で受ける。`nil` で観測なし。
     public init(
         client: Client,
@@ -55,6 +64,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         parallelToolExecution: Bool = true,
         maxTokens: Int? = nil,
         cachePolicy: PromptCachePolicy = .implicit,
+        thinkingMode: ThinkingMode = .disabled,
         telemetry: AgentTelemetrySink? = nil
     ) {
         self.client = client
@@ -65,6 +75,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         self.parallelToolExecution = parallelToolExecution
         self.maxTokens = maxTokens
         self.cachePolicy = cachePolicy
+        self.thinkingMode = thinkingMode
         self.telemetry = telemetry
     }
 
@@ -142,18 +153,34 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         for _ in 0..<maxSteps {
             try Task.checkCancellation()
 
-            let response = try await client.executeAgentStep(
+            // ステップをストリーミング実行し、テキスト/思考デルタを到着順に転送する。
+            // ストリーミング未対応プロバイダはデフォルト実装が .completed のみを返す。
+            var stepResponse: LLMResponse?
+            var streamedText = false
+            for try await streamEvent in client.streamAgentStep(
                 messages: messages,
                 model: model,
                 systemPrompt: groundedPrompt,
                 tools: tools,
                 toolChoice: tools.isEmpty ? .disabled : .auto,
                 responseSchema: nil,
-                thinkingMode: .disabled,
+                thinkingMode: thinkingMode,
                 reasoningEffort: nil,
                 maxTokens: maxTokens,
                 cachePolicy: cachePolicy
-            )
+            ) {
+                switch streamEvent {
+                case .delta(.textDelta(let delta)):
+                    streamedText = true
+                    try await onEvent(.textDelta(delta))
+                case .delta(.thinkingDelta(let delta)):
+                    try await onEvent(.thinkingDelta(delta))
+                case .completed(let response):
+                    stepResponse = response
+                }
+            }
+            // completed なしの終端（プロバイダ実装の異常系）は空レスポンスとして扱う
+            let response = stepResponse ?? LLMResponse(content: [], model: "", usage: .zero, stopReason: nil)
 
             // usage はコスト計測（metrics）として telemetry へ。意味論イベント（Event）には混ぜない。
             // ACP の usage_update への射影は ACP 境界（HostACPAgent）でこの telemetry から行う。
@@ -169,15 +196,18 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 }
             }
 
+            // 非ストリーミングプロバイダの合成デルタ: デルタが一度も流れなかったステップは
+            // 全文を 1 デルタとして emit し、消費側の契約（テキストはデルタで届く）を保つ。
+            if !streamedText, !text.isEmpty {
+                try await onEvent(.textDelta(text))
+            }
+
             if toolUses.isEmpty {
                 try await onEvent(.completed(text: text))
                 messages.append(.assistant(text))
                 return messages
             }
 
-            if !text.isEmpty {
-                try await onEvent(.thinking(text))
-            }
             messages.append(.toolUses(toolUses.map { (id: $0.id, name: $0.name, input: $0.input) }))
 
             // 対話ツールは実行せず中断し、入力要求として返す（A2A input-required へ写像）。

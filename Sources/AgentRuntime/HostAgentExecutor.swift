@@ -25,21 +25,26 @@ public actor HostAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
 
         let host = hostFor(context.contextId)
         var finalText = ""
+        // 進行中ステップのテキストデルタ蓄積。ツール呼び出し時に 1 回で掲示する
+        // （チャンクごとの status 更新は A2A ではノイズになるため）。
+        var stepText = ""
         do {
             for try await event in await host.stream(context.userInput()) {
                 switch event {
-                case .thinking(let text):
-                    if !text.isEmpty {
-                        try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text(text)]))
-                    }
+                case .textDelta(let delta):
+                    stepText += delta
                 case .toolCall(_, let name, _):
+                    if !stepText.isEmpty {
+                        try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text(stepText)]))
+                        stepText = ""
+                    }
                     try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text("→ \(name)")]))
                 case .completed(let text):
                     finalText = text
                 case .toolApprovalRequired(_, _, _, let request):
                     // A2A ホスト実行には承認 UI がないため、要求内容を報告して中断扱いにする
                     try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text(request.summary)]))
-                case .toolResult, .inputRequired:
+                case .toolResult, .inputRequired, .thinkingDelta:
                     break
                 }
             }

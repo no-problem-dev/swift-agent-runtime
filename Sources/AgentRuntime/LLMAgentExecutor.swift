@@ -86,15 +86,20 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
 
         let messages = try await makeMessages(from: context)
         do {
+            // 進行中ステップのテキストデルタ蓄積。ツール呼び出し時に 1 回で掲示する
+            // （チャンクごとの status 更新は A2A ではノイズになるため）。
+            var stepText = ""
             let transcript = try await loop.run(messages: messages) { event in
                 switch event {
-                case .thinking(let text):
-                    if !text.isEmpty {
-                        try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text(text)]))
-                    }
+                case .textDelta(let delta):
+                    stepText += delta
                 case .toolCall(_, let name, _):
+                    if !stepText.isEmpty {
+                        try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text(stepText)]))
+                        stepText = ""
+                    }
                     try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text("🔧 \(name)")]))
-                case .toolResult:
+                case .toolResult, .thinkingDelta:
                     break
                 case .toolApprovalRequired(_, _, _, let request):
                     // A2A の input-required へ写像(承認可否をテキストで尋ねる)
