@@ -7,6 +7,7 @@ import LLMClient
 /// 専用シンクへ振り分け、UI 状態ロジックは意味論イベントだけを見ればよくなる。
 public enum AgentTelemetry: Sendable {
     /// ターン開始時に組み立てられた最終 system prompt（デバッグ観測）。
+    /// `AgentLoop` が run ごとに 1 回発火する。
     case systemPrompt(rendered: String)
     /// LLM 1 ステップ分のトークン使用量（コスト計測）。
     case usage(TokenUsage, model: String)

@@ -25,8 +25,8 @@ private struct PromptCapturingClient: AgentCapableClient {
 @Suite("Today context grounding (全エージェント共通の日付前置)")
 struct TodayContextTests {
 
-    @Test("システムプロンプトの先頭に必ず今日の日付が入る")
-    func prependsTodayToExistingPrompt() async throws {
+    @Test("今日の日付はシステムプロンプトの末尾に入る（キャッシュ安定プレフィックスを壊さない）")
+    func appendsTodayAfterExistingPrompt() async throws {
         let recorder = PromptRecorder()
         let loop = AgentLoop(
             client: PromptCapturingClient(recorder: recorder),
@@ -38,7 +38,8 @@ struct TodayContextTests {
         let prompt = try #require(await recorder.prompts.first ?? nil)
         let dateIndex = try #require(prompt.range(of: "Today's date is "))
         let roleIndex = try #require(prompt.range(of: "You are a researcher."))
-        #expect(dateIndex.lowerBound < roleIndex.lowerBound)
+        // 日付は日次で変わる可変値なので、安定部（role・ツール指示）より後ろに置く
+        #expect(roleIndex.lowerBound < dateIndex.lowerBound)
     }
 
     @Test("システムプロンプトが nil でも日付だけは入る")

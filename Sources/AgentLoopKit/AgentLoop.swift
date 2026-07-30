@@ -143,13 +143,17 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
             }
         }
         // 日付はターン（run）ごとに評価する — 長寿命セッションが日をまたいでも正しい。
-        // ツール同伴指示（A2UI スキーマ等）は末尾へ後置（ADK process_llm_request 相当）。
+        // ツール同伴指示（A2UI スキーマ等）は後置（ADK process_llm_request 相当）、
+        // 日付はさらにその後ろ — 日次で変わる可変値を先頭に置くとプロンプトキャッシュの
+        // 安定プレフィックスが毎日壊れるため、可変部は必ず末尾に置く。
         let groundedPrompt = SystemPrompt(
-            components: [.context(Self.todayContext())]
-                + (systemPrompt?.components ?? [])
-                + tools.systemInstructions.map { .context($0) },
+            components: (systemPrompt?.components ?? [])
+                + tools.systemInstructions.map { .context($0) }
+                + [.context(Self.todayContext())],
             metadata: systemPrompt?.metadata
         )
+        // レンダリング済みプロンプトを側帯で観測させる（デバッグ画面での最終プロンプト表示用）。
+        await telemetry?(.systemPrompt(rendered: groundedPrompt.render()))
         for _ in 0..<maxSteps {
             try Task.checkCancellation()
 
