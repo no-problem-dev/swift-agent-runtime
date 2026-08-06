@@ -38,6 +38,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     private let maxTokens: Int?
     private let cachePolicy: PromptCachePolicy
     private let thinkingMode: ThinkingMode
+    private let reasoningEffort: ReasoningEffort?
     /// 側帯観測（systemPrompt/usage）の注入先。意味論イベントと混ぜない。
     private let telemetry: AgentTelemetrySink?
 
@@ -54,6 +55,9 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     ///   - cachePolicy: system prompt と tools の安定プレフィックスに対するプロンプトキャッシュ方針。全ステップに適用される。
     ///   - thinkingMode: 拡張思考の設定。デフォルト `.disabled`（思考トークンのコストを発生させない）。
     ///     ストリーミング可否とは独立で、`.disabled` でもテキストデルタは流れる。
+    ///   - reasoningEffort: reasoning モデル（OpenAI GPT-5 系 / Gemini 3 系）の思考量。
+    ///     `nil`（デフォルト）でプロバイダの既定に任せる。**モデルが受け付けない段は
+    ///     プロバイダ側で近い段へ寄せられる**ので、ここでモデルを気にしなくてよい。
     ///   - telemetry: usage / system prompt 等の観測フック。意味論イベント（`Event`）とは別の側帯で受ける。`nil` で観測なし。
     public init(
         client: Client,
@@ -65,6 +69,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         maxTokens: Int? = nil,
         cachePolicy: PromptCachePolicy = .implicit,
         thinkingMode: ThinkingMode = .disabled,
+        reasoningEffort: ReasoningEffort? = nil,
         telemetry: AgentTelemetrySink? = nil
     ) {
         self.client = client
@@ -76,6 +81,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         self.maxTokens = maxTokens
         self.cachePolicy = cachePolicy
         self.thinkingMode = thinkingMode
+        self.reasoningEffort = reasoningEffort
         self.telemetry = telemetry
     }
 
@@ -171,7 +177,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 toolChoice: tools.isEmpty ? .disabled : .auto,
                 responseSchema: nil,
                 thinkingMode: thinkingMode,
-                reasoningEffort: nil,
+                reasoningEffort: reasoningEffort,
                 maxTokens: maxTokens,
                 cachePolicy: cachePolicy
             ) {
