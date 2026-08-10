@@ -1,3 +1,7 @@
+import LLMTool
+import LLMCore
+import LLMAgentStep
+import LLMClient
 import Foundation
 import Testing
 import A2ACore

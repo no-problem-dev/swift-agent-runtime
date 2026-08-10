@@ -23,7 +23,7 @@ let package = Package(
         // A2A メタデータ（StructuredValue）。委譲結果に usage を載せて運ぶために使用
         .package(url: "https://github.com/no-problem-dev/swift-structured-data.git", "1.3.0" ..< "3.0.0"),
         // ACP（host↔agent 縦境界）。ループの出力を唯一のイベント語彙 session/update に射影する
-        .package(url: "https://github.com/no-problem-dev/swift-acp.git", from: "0.1.0"),
+        .package(url: "https://github.com/no-problem-dev/swift-acp.git", from: "0.2.0"),
     ],
     targets: [
         // 汎用エージェントループ層

@@ -4,6 +4,6 @@
 // 自分で swift-a2a への依存を宣言すること（暗黙の可視性に寄りかかると、
 // 依存グラフに現れない結合が育つ）。
 @_exported import AgentLoopKit
-@_exported import A2ACore
-@_exported import LLMClient
-@_exported import LLMTool
+import A2ACore
+import LLMClient
+import LLMTool
