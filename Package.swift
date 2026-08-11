@@ -19,7 +19,7 @@ let package = Package(
         .package(url: "https://github.com/no-problem-dev/swift-a2a.git", .upToNextMinor(from: "0.8.0")),
         // LLM プロバイダ抽象・Tool・SystemPrompt（ループは持たない＝ランタイムが自前実装）。
         // agent-step 契約は LLMAgentStep（3.5.1 で L0 から分離）から取り込む。
-        .package(url: "https://github.com/no-problem-dev/swift-llm-client.git", from: "4.0.0"),
+        .package(url: "https://github.com/no-problem-dev/swift-llm-client.git", from: "5.0.0"),
         // A2A メタデータ（StructuredValue）。委譲結果に usage を載せて運ぶために使用
         .package(url: "https://github.com/no-problem-dev/swift-structured-data.git", from: "3.0.0"),
         // ACP（host↔agent 縦境界）。ループの出力を唯一のイベント語彙 session/update に射影する
