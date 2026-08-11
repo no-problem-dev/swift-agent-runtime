@@ -79,7 +79,7 @@ print(try await host.run("Research the latest trends in quantum computing."))
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/no-problem-dev/swift-agent-runtime.git", .upToNextMinor(from: "0.19.0"))
+    .package(url: "https://github.com/no-problem-dev/swift-agent-runtime.git", .upToNextMinor(from: "0.20.0"))
 ]
 ```
 

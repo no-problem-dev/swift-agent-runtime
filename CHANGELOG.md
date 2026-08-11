@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-08-11
+
 ### Changed
 
 - Raised the swift-llm-client pin to 5.0.0. 0.19.0 shipped with it still at 4.x, which made this
