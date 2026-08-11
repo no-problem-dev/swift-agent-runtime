@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Builds and tests on Linux, verified against `swift:6.2` in Docker. No source change was needed:
+  nothing here is Apple-only, and the manifest's existing version ranges already resolve to
+  swift-structured-data 3.0.1, which carries that package's Linux fix. A working copy still holding
+  a `Package.resolved` from before that release fails on `CFGetTypeID` until it resolves again —
+  the file is not tracked here, so a fresh checkout never sees it.
+
+### Fixed
+
+- The two cancellation tests read their worker's flag on a timer rather than on the event. One
+  waited a fixed 100 ms for the worker to reach its hang point; both then checked "cancellation
+  reached the worker" the instant the host's run threw, though the worker runs on its own task and
+  marks the flag slightly later. Both now poll for the state they are waiting on. They failed only
+  under load — the first on Linux, the second on macOS — which is the shape of a flake, not of a
+  platform difference.
+
 ## [0.20.0] - 2026-08-11
 
 ### Changed

@@ -10,7 +10,9 @@ import A2AInProcess
 private enum MockError: Error { case unused }
 
 private actor CancelFlag {
+    private(set) var started = false
     private(set) var cancelled = false
+    func markStarted() { started = true }
     func mark() { cancelled = true }
 }
 
@@ -32,6 +34,7 @@ private struct HangingWorkerClient: AgentCapableClient {
     typealias Model = String
     let flag: CancelFlag
     func executeAgentStep(messages: [LLMMessage], model: String, systemPrompt: SystemPrompt?, tools: ToolSet, toolChoice: ToolChoice?, responseSchema: JSONSchema?, thinkingMode: ThinkingMode, reasoningEffort: ReasoningEffort?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> LLMResponse {
+        await flag.markStarted()
         do { try await Task.sleep(for: .seconds(5)) } catch { await flag.mark(); throw error }
         return LLMResponse(content: [.text("done")], model: "mock", usage: TokenUsage(inputTokens: 0, outputTokens: 0), stopReason: .endTurn)
     }
@@ -110,7 +113,13 @@ struct CancelAPITests {
         let session = HostAgent(client: AlwaysDelegateClient(target: "worker"), model: "mock", registry: registry, maxSteps: 4)
 
         let runTask = Task { try await session.run("do it") }
-        try await Task.sleep(for: .milliseconds(100))   // let the worker reach its hang point
+        // Cancelling before the worker reaches its hang point would prove nothing, and a fixed
+        // delay only looks like waiting — on a loaded machine the worker can still be un-started
+        // when it elapses, and the test then fails for a reason unrelated to cancellation.
+        for _ in 0..<400 where await !flag.started {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await flag.started)
 
         await session.cancel()
 
@@ -119,6 +128,11 @@ struct CancelAPITests {
             Issue.record("expected run to be cancelled")
         } catch {
             // Expected: the run threw rather than returning a value.
+        }
+        // The worker runs on its own task, so the host's run can throw before the worker has
+        // observed cancellation.
+        for _ in 0..<400 where await !flag.cancelled {
+            try await Task.sleep(for: .milliseconds(5))
         }
         #expect(await flag.cancelled)
     }

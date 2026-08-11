@@ -5,7 +5,7 @@ English | [日本語](./README.ja.md)
 Build an LLM agent that keeps calling your tools until a task is done, and have several such agents hand work to one another.
 
 ![Swift](https://img.shields.io/badge/Swift-6.2-orange.svg)
-![Platforms](https://img.shields.io/badge/Platforms-iOS%2017+%20%7C%20macOS%2014+-blue.svg)
+![Platforms](https://img.shields.io/badge/Platforms-iOS%2017+%20%7C%20macOS%2014+%20%7C%20Linux-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 ## Overview
@@ -94,7 +94,7 @@ Add the product you need. `AgentLoopKit` carries no agent-to-agent dependency:
 
 ## Requirements
 
-- iOS 17.0+ / macOS 14.0+
+- iOS 17.0+ / macOS 14.0+ / Linux
 - Swift 6.2+
 
 ## License

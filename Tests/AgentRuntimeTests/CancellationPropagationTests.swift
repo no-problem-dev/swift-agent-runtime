@@ -86,7 +86,12 @@ struct CancellationPropagationTests {
             // Expected.
         }
 
-        // And it reached the worker that was mid-execution, not just the host.
+        // And it reached the worker that was mid-execution, not just the host. The worker runs on
+        // its own task, so the host's run can throw before the worker has observed cancellation —
+        // reading the flag once, right here, is reading it too early on a loaded machine.
+        for _ in 0..<400 where await !flag.cancelled {
+            try await Task.sleep(for: .milliseconds(5))
+        }
         #expect(await flag.cancelled)
     }
 }
