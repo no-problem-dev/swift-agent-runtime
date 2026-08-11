@@ -71,14 +71,15 @@ struct CancelAPITests {
         let card = makeCard("weather")
         await registry.register(card: card, handler: DefaultRequestHandler(agentCard: card, executor: PausingExecutor()))
 
-        #expect(await registry.cancel("weather") == nil)   // nothing sent yet, so no task
-        #expect(await registry.cancel("ghost") == nil)      // not registered at all
+        #expect(await registry.cancel("weather").lastState == nil)   // nothing sent yet, so no task
+        #expect(await registry.cancel("ghost").lastState == nil)      // not registered at all
 
         let outcome = try await registry.send(to: "weather", text: "go")
         #expect(outcome.state == .inputRequired)
 
-        let state = await registry.cancel("weather")
-        #expect(state == .canceled)
+        let cancellation = await registry.cancel("weather")
+        #expect(cancellation.lastState == .canceled)
+        #expect(!cancellation.didFail)
     }
 
     @Test("registry.cancelAll は best-effort（完了済みワーカーでも throw しない）")
@@ -94,7 +95,9 @@ struct CancelAPITests {
         await registry.register(card: card, handler: DefaultRequestHandler(agentCard: card, executor: Done()))
         _ = try await registry.send(to: "done", text: "go")   // already terminal
 
-        await registry.cancelAll()   // cancelling a finished worker must not throw
+        // Cancelling a finished worker must not throw, and must not be reported as a failed
+        // request either — there was simply nothing left to stop.
+        #expect(await registry.cancelAll().isEmpty)
     }
 
     @Test("session.cancel() は in-flight run を止め、委譲中の実行ワーカーも停止する")

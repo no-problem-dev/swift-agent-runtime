@@ -13,6 +13,15 @@ public enum HostACPAgentError: Error, Sendable {
     case unknownSession(SessionId)
     /// An ACP extension method this agent does not implement.
     case unsupported(String)
+    /// The session's working directory could not be prepared, so nothing about the session can be
+    /// written. Raised when the session is created, rather than one turn at a time from then on.
+    case sessionDirectoryUnusable(cwd: String, underlying: String)
+    /// The turn ran, and its updates were sent, but the conversation could not be written. The
+    /// turn is lost: reloading this session will resume from whatever was last written.
+    case conversationNotPersisted(sessionId: SessionId, underlying: String)
+    /// A conversation file is there but could not be read or decoded. Raised rather than treated
+    /// as an empty conversation, because starting over would quietly discard the user's history.
+    case conversationUnreadable(cwd: String, underlying: String)
 }
 
 public extension StopReason {
@@ -86,12 +95,21 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
 
     // MARK: - Session lifecycle
 
+    /// Creates a session and the working directory its conversation is written to.
+    ///
+    /// - Throws: `HostACPAgentError.sessionDirectoryUnusable` if that directory cannot be made. A
+    ///   session that cannot be written is refused here rather than accepted and then losing every
+    ///   turn silently.
     public func newSession(_ request: NewSessionRequest) async throws -> NewSessionResponse {
         // The id is derived from the working directory's name so that it matches the identity on
         // disk and a reload gets the same id back. Two directories with the same last component
         // therefore collide, and the second session replaces the first.
         let id = Self.sessionId(forCwd: request.cwd)
-        try? FileManager.default.createDirectory(at: URL(fileURLWithPath: request.cwd), withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: URL(fileURLWithPath: request.cwd), withIntermediateDirectories: true)
+        } catch {
+            throw HostACPAgentError.sessionDirectoryUnusable(cwd: request.cwd, underlying: "\(error)")
+        }
         sessions[id] = Session(host: makeHost(), cwd: request.cwd)
         return NewSessionResponse(sessionId: id)
     }
@@ -101,27 +119,41 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
         return SessionId(name.isEmpty ? UUID().uuidString : name)
     }
 
-    // The conversation is stored per session under its working directory. Both directions fail
-    // quietly: a write that fails is not reported, and a missing or unreadable file loads as an
-    // empty conversation, so a reload can silently start over instead of resuming.
+    // The conversation is stored per session under its working directory. Neither direction fails
+    // quietly: a write that fails throws, and only a file that is not there at all reads as an
+    // empty conversation — one that exists but cannot be read throws rather than starting over.
     nonisolated private static func conversationURL(cwd: String) -> URL {
         URL(fileURLWithPath: cwd).appendingPathComponent("conversation.json")
     }
-    nonisolated private static func persistConversation(_ messages: [LLMMessage], cwd: String) {
+    nonisolated private static func persistConversation(_ messages: [LLMMessage], cwd: String) throws {
         let url = conversationURL(cwd: cwd)
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if let data = try? JSONEncoder().encode(messages) { try? data.write(to: url, options: .atomic) }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(messages)
+        try data.write(to: url, options: .atomic)
     }
-    nonisolated private static func loadConversation(cwd: String) -> [LLMMessage] {
-        guard let data = try? Data(contentsOf: conversationURL(cwd: cwd)),
-              let messages = try? JSONDecoder().decode([LLMMessage].self, from: data) else { return [] }
-        return messages
+    /// - Returns: The stored conversation, or an empty one when this session has never been written.
+    /// - Throws: `HostACPAgentError.conversationUnreadable` when a file is there but unusable —
+    ///   history that exists and cannot be read is data loss, not a new session.
+    nonisolated private static func loadConversation(cwd: String) throws -> [LLMMessage] {
+        let url = conversationURL(cwd: cwd)
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        do {
+            return try JSONDecoder().decode([LLMMessage].self, from: try Data(contentsOf: url))
+        } catch {
+            throw HostACPAgentError.conversationUnreadable(cwd: cwd, underlying: "\(error)")
+        }
     }
 
+    /// Rebuilds a session from its stored conversation.
+    ///
+    /// - Throws: `HostACPAgentError.conversationUnreadable` if the session has a conversation file
+    ///   that cannot be read. The session is not registered in that case, so a client cannot
+    ///   continue on top of history it has lost.
     public func loadSession(_ request: LoadSessionRequest) async throws -> LoadSessionResponse {
         // Seed the new orchestrator from the stored conversation so the reloaded session continues.
+        let stored = try Self.loadConversation(cwd: request.cwd)
         let host = makeHost()
-        await host.loadHistory(Self.loadConversation(cwd: request.cwd))
+        await host.loadHistory(stored)
         sessions[request.sessionId] = Session(host: host, cwd: request.cwd)
         return LoadSessionResponse()
     }
@@ -160,7 +192,9 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
     /// is still persisted. Any other failure propagates after the updates already sent.
     ///
     /// - Throws: `HostACPAgentError.unknownSession` for an id that was never created or loaded,
-    ///   or a conversion failure for an attachment the model cannot accept.
+    ///   a conversion failure for an attachment the model cannot accept, or
+    ///   `HostACPAgentError.conversationNotPersisted` when the turn ran but could not be written —
+    ///   the updates for it have already been sent, and reloading the session will not include it.
     public func prompt(_ request: PromptRequest) async throws -> PromptResponse {
         guard let session = sessions[request.sessionId] else {
             throw HostACPAgentError.unknownSession(request.sessionId)
@@ -200,7 +234,11 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
             stopReason = .cancelled
         }
         // Persist after every turn, cancelled ones included, so a reload resumes from here.
-        Self.persistConversation(await session.host.messages, cwd: session.cwd)
+        do {
+            try Self.persistConversation(await session.host.messages, cwd: session.cwd)
+        } catch {
+            throw HostACPAgentError.conversationNotPersisted(sessionId: sessionId, underlying: "\(error)")
+        }
         return PromptResponse(stopReason: stopReason)
     }
 

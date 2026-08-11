@@ -137,7 +137,9 @@ struct DelegateAsyncTool: Tool {
 /// Reads a background task's state and result on demand.
 ///
 /// Read-only and repeatable. A task still running comes back as text telling the model to check
-/// again later, so a poll loop costs a model step each time it goes round.
+/// again later, so a poll loop costs a model step each time it goes round. A task that could not
+/// be re-read comes back as an error naming the failure, never as its last known state worded as
+/// if it had just been read.
 struct CheckTaskTool: Tool {
     private let registry: AgentConnectionRegistry
 
@@ -162,6 +164,11 @@ struct CheckTaskTool: Tool {
     func execute(with argumentsData: Data) async throws -> ToolResult {
         let arguments = try JSONDecoder().decode(Arguments.self, from: argumentsData)
         let status = try await registry.checkTask(TaskID(arguments.task_id))
+        // The reading never happened, so nothing below it can be stated as current.
+        if case .stale(let reason) = status.freshness {
+            return .error("Could not read task \(status.taskId.rawValue) (\(status.name)): \(reason). "
+                + "Its state is unknown; the last one seen was \(status.state.rawValue). Try again.")
+        }
         switch status.state {
         case .failed:
             return .error("Task \(status.taskId.rawValue) (\(status.name)) failed: \(status.text)")
@@ -191,12 +198,17 @@ struct ListRunningTasksTool: Tool {
         let agent_name: String
         let task_id: String
         let state: String
+        /// Present only when the task could not be re-read, so `state` is the last one seen rather
+        /// than the current one.
+        let unreadable_reason: String?
     }
 
     var toolName: String { "list_running_tasks" }
     var toolDescription: String {
         "List all delegated tasks that are still running (not yet completed). "
-            + "Each entry has agent_name, task_id and state. Use check_task to fetch a completed task's result."
+            + "Each entry has agent_name, task_id and state, plus unreadable_reason when the agent "
+            + "could not be reached — for those, state is the last one seen and may be out of date. "
+            + "Use check_task to fetch a completed task's result."
     }
     var inputSchema: JSONSchema {
         .object(properties: [:])
@@ -204,7 +216,14 @@ struct ListRunningTasksTool: Tool {
 
     func execute(with argumentsData: Data) async throws -> ToolResult {
         let running = await registry.listRunningTasks()
-        let payload = running.map { RunningTask(agent_name: $0.name, task_id: $0.taskId.rawValue, state: $0.state.rawValue) }
+        let payload = running.map { status in
+            RunningTask(
+                agent_name: status.name,
+                task_id: status.taskId.rawValue,
+                state: status.state.rawValue,
+                unreadable_reason: { if case .stale(let reason) = status.freshness { return reason }; return nil }()
+            )
+        }
         let data = try JSONEncoder().encode(payload)
         return .json(data)
     }

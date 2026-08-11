@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Overlapping `run` calls made the first uncancellable**, so `cancel()` silently cancelled
+  nothing. An overlapping run is refused now, and ending a turn only clears the turn it owns, so a
+  stale `defer` cannot orphan a live one.
+- **A network failure reading a task was indistinguishable from a task not yet persisted** — the
+  caller got stale data presented as current. Reads now carry their freshness, and `check_task`
+  surfaces staleness to the model instead of answering "still submitted, check again later".
+- **Failed conversation writes were invisible**, so `session/load` silently started fresh and the
+  user's history appeared to vanish. Loading also tells "no file yet" from "exists but
+  undecodable".
+- Tool calls were spawned one task each with no concurrency cap. `delegatedTasks` and
+  `HostAgentExecutor.hosts` were never pruned — the first also leaked its monitor tasks, and the
+  second held prompt caches for hosts nobody was using.
+
+
 ## [0.18.1] - 2026-08-11
 
 ### Fixed

@@ -58,6 +58,39 @@ private func makeTools(_ tracker: ConcurrencyTracker) -> ToolSet {
     }
 }
 
+/// Asks for a whole batch in one step — the shape a model produces when it fans out.
+private struct BatchToolClient: AgentCapableClient {
+    typealias Model = String
+    let count: Int
+    func executeAgentStep(messages: [LLMMessage], model: String, systemPrompt: SystemPrompt?, tools: ToolSet, toolChoice: ToolChoice?, responseSchema: JSONSchema?, thinkingMode: ThinkingMode, reasoningEffort: ReasoningEffort?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> LLMResponse {
+        let hasResults = messages.contains { message in
+            message.contents.contains { if case .toolResult = $0 { return true } else { return false } }
+        }
+        if hasResults {
+            return LLMResponse(content: [.text("done")], model: "mock", usage: TokenUsage(inputTokens: 0, outputTokens: 0), stopReason: .endTurn)
+        }
+        return LLMResponse(
+            content: (0..<count).map { .toolUse(id: "t\($0)", name: batchToolName($0), input: Data("{}".utf8)) },
+            model: "mock", usage: TokenUsage(inputTokens: 0, outputTokens: 0), stopReason: .toolUse
+        )
+    }
+    func generateWithUsage<T: StructuredProtocol>(input: LLMInput, model: String, options: GenerationOptions) async throws -> GenerationResult<T> { throw MockError.unused }
+    func generateWithUsage<T: StructuredProtocol>(messages: [LLMMessage], model: String, options: GenerationOptions) async throws -> GenerationResult<T> { throw MockError.unused }
+    func planToolCalls(prompt: String, model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> ToolCallResponse { throw MockError.unused }
+    func planToolCalls(messages: [LLMMessage], model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> ToolCallResponse { throw MockError.unused }
+}
+
+/// Zero-padded so the call order is also the alphabetical order, making a reorder obvious.
+private func batchToolName(_ index: Int) -> String { String(format: "tool%02d", index) }
+
+private func makeBatchTools(_ tracker: ConcurrencyTracker, count: Int) -> ToolSet {
+    var set = ToolSet {}
+    for index in 0..<count {
+        set = set + ToolSet { TrackTool(name: batchToolName(index), tracker: tracker) }
+    }
+    return set
+}
+
 @Suite("Parallel tool execution")
 struct ParallelToolTests {
 
@@ -99,5 +132,48 @@ struct ParallelToolTests {
         #expect(final == "done")
         #expect(toolResults == ["toolA", "toolB"])
         #expect(await tracker.maxConcurrent == 1)       // never overlapped
+    }
+
+    @Test("大きなバッチでも既定の同時実行上限を超えない。結果は呼び出し順", .timeLimit(.minutes(1)))
+    func defaultCapBoundsALargeBatch() async throws {
+        let batch = 20
+        let tracker = ConcurrencyTracker()
+        let loop = AgentLoop(client: BatchToolClient(count: batch), model: "mock", tools: makeBatchTools(tracker, count: batch))
+
+        var toolResults: [String] = []
+        try await loop.run(messages: [.user("go")]) { event in
+            if case .toolResult(_, let name, _, _) = event { toolResults.append(name) }
+        }
+
+        #expect(toolResults == (0..<batch).map(batchToolName))
+        #expect(await tracker.maxConcurrent <= AgentLoop<BatchToolClient>.defaultMaxConcurrentToolCalls)
+        #expect(await tracker.maxConcurrent > 1)        // still parallel, just bounded
+    }
+
+    @Test("maxConcurrentToolCalls を指定すると、その数を超えない", .timeLimit(.minutes(1)))
+    func explicitCapIsRespected() async throws {
+        let batch = 12
+        let cap = 3
+        let tracker = ConcurrencyTracker()
+        let loop = AgentLoop(
+            client: BatchToolClient(count: batch), model: "mock",
+            tools: makeBatchTools(tracker, count: batch),
+            maxConcurrentToolCalls: cap
+        )
+
+        var toolResults: [String] = []
+        var final: String?
+        try await loop.run(messages: [.user("go")]) { event in
+            switch event {
+            case .toolResult(_, let name, _, _): toolResults.append(name)
+            case .completed(let text): final = text
+            default: break
+            }
+        }
+
+        #expect(final == "done")
+        #expect(toolResults == (0..<batch).map(batchToolName))
+        #expect(await tracker.maxConcurrent <= cap)
+        #expect(await tracker.maxConcurrent > 1)
     }
 }

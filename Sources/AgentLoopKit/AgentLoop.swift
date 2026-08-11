@@ -45,6 +45,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     private let systemPrompt: SystemPrompt?
     private let maxSteps: Int
     private let parallelToolExecution: Bool
+    private let maxConcurrentToolCalls: Int
     private let maxTokens: Int?
     private let cachePolicy: PromptCachePolicy
     private let thinkingMode: ThinkingMode
@@ -60,9 +61,14 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     ///   - systemPrompt: Prepended to every step. When `nil`, only the date line is sent.
     ///   - maxSteps: How many model steps one `run` may take. Hitting the limit emits `completed`
     ///     with empty text rather than throwing, so callers must not read that as success.
-    ///   - parallelToolExecution: When `true` (the default), all tools requested in one step run
-    ///     concurrently in a task group — one child task per call, with no concurrency cap — and
-    ///     their results are reordered to match the call order. `false` runs them one at a time.
+    ///   - parallelToolExecution: When `true` (the default), the tools requested in one step run
+    ///     concurrently in a task group, up to `maxConcurrentToolCalls` at a time, and their
+    ///     results are reordered to match the call order. `false` runs them one at a time.
+    ///   - maxConcurrentToolCalls: How many tool calls from one step may be in flight at once.
+    ///     A model is free to ask for an arbitrarily large batch, and each call can be a network
+    ///     request or a subprocess, so this is what keeps one step from opening all of them at
+    ///     the same moment. Ignored when `parallelToolExecution` is `false`. Values below one are
+    ///     treated as one.
     ///   - maxTokens: Output token ceiling per step. `nil` uses the model's own default.
     ///   - cachePolicy: Prompt caching for the stable prefix (system prompt and tool schemas).
     ///     Applied to every step.
@@ -79,6 +85,7 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         systemPrompt: SystemPrompt? = nil,
         maxSteps: Int = 12,
         parallelToolExecution: Bool = true,
+        maxConcurrentToolCalls: Int = AgentLoop.defaultMaxConcurrentToolCalls,
         maxTokens: Int? = nil,
         cachePolicy: PromptCachePolicy = .implicit,
         thinkingMode: ThinkingMode = .disabled,
@@ -91,12 +98,19 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         self.systemPrompt = systemPrompt
         self.maxSteps = maxSteps
         self.parallelToolExecution = parallelToolExecution
+        self.maxConcurrentToolCalls = max(1, maxConcurrentToolCalls)
         self.maxTokens = maxTokens
         self.cachePolicy = cachePolicy
         self.thinkingMode = thinkingMode
         self.reasoningEffort = reasoningEffort
         self.telemetry = telemetry
     }
+
+    /// How many tool calls from one step run at once when nothing else is said.
+    ///
+    /// Wide enough that an ordinary fan-out of a handful of tools still overlaps completely, and
+    /// narrow enough that a runaway batch cannot open dozens of connections in one step.
+    public static var defaultMaxConcurrentToolCalls: Int { 8 }
 
     /// The date line that grounds the model past its knowledge cutoff.
     ///
@@ -224,6 +238,10 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                     stepResponse = response
                 }
             }
+            // A cancelled step ends its stream without .completed, exactly as a broken provider
+            // does — the stream is torn down rather than thrown from. Checking here keeps the two
+            // apart, so cancellation propagates instead of being reported as an empty answer.
+            try Task.checkCancellation()
             // A stream that ends without .completed is a broken provider; treat it as empty.
             let response = stepResponse ?? LLMResponse(content: [], model: "", usage: .zero, stopReason: nil)
 
@@ -288,26 +306,43 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 try await onEvent(.toolCall(id: use.id, name: use.name, input: use.input))
             }
 
-            // Several tools run concurrently — one child task each, no cap — and the results are
-            // put back into call order before they reach the model.
+            // Several tools run concurrently, at most `maxConcurrentToolCalls` at a time, and the
+            // results are put back into call order before they reach the model.
             let executed: [ToolResult]
             if parallelToolExecution, toolUses.count > 1 {
                 let tools = self.tools
                 // Every child gets the same by-value snapshot of the messages, so concurrent
                 // transcript-aware tools cannot observe each other's writes.
                 let transcript = messages
+                let batch = toolUses
+                let runTool: @Sendable (Int) async -> (Int, ToolResult) = { index in
+                    let use = batch[index]
+                    do {
+                        return (index, try await tools.execute(toolNamed: use.name, with: use.input, transcript: transcript))
+                    } catch {
+                        return (index, .error("\(error)"))
+                    }
+                }
+                let limit = min(maxConcurrentToolCalls, toolUses.count)
                 executed = try await withThrowingTaskGroup(of: (Int, ToolResult).self) { group in
-                    for (index, use) in toolUses.enumerated() {
-                        group.addTask {
-                            do {
-                                return (index, try await tools.execute(toolNamed: use.name, with: use.input, transcript: transcript))
-                            } catch {
-                                return (index, .error("\(error)"))
-                            }
-                        }
+                    // Fill the group to the cap, then top it up one at a time as results land, so
+                    // the number in flight never goes above the cap however large the batch is.
+                    var next = 0
+                    while next < limit {
+                        let index = next
+                        group.addTask { await runTool(index) }
+                        next += 1
                     }
                     var collected: [(Int, ToolResult)] = []
-                    for try await pair in group { collected.append(pair) }
+                    collected.reserveCapacity(toolUses.count)
+                    while let pair = try await group.next() {
+                        collected.append(pair)
+                        if next < toolUses.count {
+                            let index = next
+                            group.addTask { await runTool(index) }
+                            next += 1
+                        }
+                    }
                     return collected.sorted { $0.0 < $1.0 }.map(\.1)
                 }
             } else {

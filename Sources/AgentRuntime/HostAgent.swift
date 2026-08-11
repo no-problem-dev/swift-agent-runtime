@@ -5,6 +5,14 @@ import LLMTool
 import LLMAgentStep
 import Foundation
 
+/// Raised by the host's own turn handling.
+public enum HostAgentError: Error, Sendable, Equatable {
+    /// A turn was started while another was still in flight. The host owns one conversation, so a
+    /// second concurrent turn would interleave into the same history and produce a transcript
+    /// neither caller asked for. Wait for the turn to finish, or `cancel()` it first.
+    case turnAlreadyRunning
+}
+
 /// An agent whose job is to hand work to other agents and compose their answers.
 ///
 /// The host is itself a model in a tool loop; its tools are the delegation tools, and its prompt
@@ -16,8 +24,9 @@ import Foundation
 /// the tool calls and their results, so a follow-up can be answered from context without
 /// delegating again. Call `clear()` to start over.
 ///
-/// The actor serialises turns, but nothing rejects a second concurrent turn — it will queue and
-/// then extend the same history. Only one turn at a time is cancellable.
+/// One turn runs at a time. A `run` or `stream` started while another turn is in flight is
+/// refused with `HostAgentError.turnAlreadyRunning` rather than joining it, which is what keeps
+/// the history a single conversation and keeps `cancel()` unambiguous about what it stops.
 public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable {
     private let client: Client
     private let model: Client.Model
@@ -31,7 +40,14 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
     private let maxValidationRetries: Int
     private let cachePolicy: PromptCachePolicy
     private var history: [LLMMessage] = []
-    private var currentRun: Task<String, Error>?
+
+    /// The turn in flight, if there is one. Identified so that a turn only ever clears its own
+    /// registration — a finishing turn must not deregister the one that came after it.
+    private struct ActiveTurn {
+        let id: UUID
+        let cancel: @Sendable () -> Void
+    }
+    private var activeTurn: ActiveTurn?
 
     /// Creates a host bound to one client, model and worker registry.
     ///
@@ -96,6 +112,9 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         history = messages
     }
 
+    /// Whether a turn is in flight. Starting another one while this is `true` is refused.
+    public var isRunningTurn: Bool { activeTurn != nil }
+
     /// Runs one turn from a text prompt and returns the final answer.
     public func run(_ userInput: String) async throws -> String {
         try await run(.user(userInput))
@@ -106,10 +125,16 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
     /// Cancelling the calling task cancels the turn and, through the structured tree, the workers
     /// it delegated to. The history is only updated when the turn completes, so a cancelled turn
     /// leaves the conversation as it was.
+    ///
+    /// - Throws: `HostAgentError.turnAlreadyRunning` if a turn is already in flight, on top of
+    ///   whatever the turn itself throws.
     public func run(_ userMessage: LLMMessage) async throws -> String {
+        // Claimed before the first suspension point, so two callers cannot both get through.
+        guard activeTurn == nil else { throw HostAgentError.turnAlreadyRunning }
+        let id = UUID()
         let task = Task { try await self.runInner(userMessage) }
-        currentRun = task
-        defer { currentRun = nil }
+        activeTurn = ActiveTurn(id: id, cancel: { task.cancel() })
+        defer { endTurn(id) }
         // Bridge the caller's cancellation into the retained task, so cancelling from outside and
         // calling cancel() take the same path.
         return try await withTaskCancellationHandler {
@@ -119,14 +144,19 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         }
     }
 
+    /// Releases the registration for one turn, and only that turn.
+    private func endTurn(_ id: UUID) {
+        if activeTurn?.id == id { activeTurn = nil }
+    }
+
     /// Stops the turn in progress and asks every worker to stop too.
     ///
     /// Cancels the running turn, which propagates down the structured tree, and separately
     /// cancels each worker's task so background delegations that outlive the turn also stop.
-    /// Only reaches a turn started through `run`; a `stream` turn is stopped by ending its stream.
-    /// Safe to call when nothing is running.
+    /// Reaches the turn whichever way it was started, `run` or `stream`, because only one runs at
+    /// a time. Safe to call when nothing is running.
     public func cancel() async {
-        currentRun?.cancel()
+        activeTurn?.cancel()
         await registry.cancelAll()
     }
 
@@ -166,13 +196,21 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
 
     /// Runs one turn from a prompt that may carry attachments, delivering events as they happen.
     ///
-    /// The turn runs in an unstructured task and is not tracked by `cancel()` — terminating the
-    /// stream is what stops it. With a validator configured, a rejected answer is regenerated,
-    /// which means a consumer can see two `completed` events in one turn; watch the telemetry
-    /// sink to tell "this is being replaced" from "this is final".
+    /// The turn runs in an unstructured task, stopped either by terminating the stream or by
+    /// `cancel()` — it is the same turn to both. Starting this while another turn is in flight
+    /// fails the stream with `HostAgentError.turnAlreadyRunning` instead of running alongside it.
+    /// With a validator configured, a rejected answer is regenerated, which means a consumer can
+    /// see two `completed` events in one turn; watch the telemetry sink to tell "this is being
+    /// replaced" from "this is final".
     public func stream(_ userMessage: LLMMessage, telemetry: AgentTelemetrySink? = nil) -> AsyncThrowingStream<AgentLoop<Client>.Event, Error> {
         AsyncThrowingStream { continuation in
+            guard activeTurn == nil else {
+                continuation.finish(throwing: HostAgentError.turnAlreadyRunning)
+                return
+            }
+            let id = UUID()
             let task = Task {
+                defer { self.endTurn(id) }
                 do {
                     // Each generation is validated, and a rejected one is retried by sending the
                     // corrective prompt as a new user turn — so the failed attempt stays in the
@@ -206,6 +244,7 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
                     continuation.finish(throwing: error)
                 }
             }
+            activeTurn = ActiveTurn(id: id, cancel: { task.cancel() })
             continuation.onTermination = { _ in task.cancel() }
         }
     }
