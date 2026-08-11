@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-11
+
 ### Fixed
 
 - **Overlapping `run` calls made the first uncancellable**, so `cancel()` silently cancelled

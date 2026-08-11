@@ -81,7 +81,7 @@ delegation between agents, background tasks, and exposing a host over ACP.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/no-problem-dev/swift-agent-runtime.git", .upToNextMinor(from: "0.18.0"))
+    .package(url: "https://github.com/no-problem-dev/swift-agent-runtime.git", .upToNextMinor(from: "0.19.0"))
 ]
 ```
 
