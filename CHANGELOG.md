@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Raised the swift-llm-client pin to 5.0.0. 0.19.0 shipped with it still at 4.x, which made this
+  package unresolvable alongside anything on llm-client 5 — swift-research-agent hit it first.
+
+
 ## [0.19.0] - 2026-08-11
 
 ### Fixed
