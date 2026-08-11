@@ -8,7 +8,8 @@ import Testing
 
 private enum MockError: Error { case unused }
 
-/// 1 回目に承認必須ツール(+ 任意で承認不要ツール)を呼び、以降は最終テキストを返す。
+/// Requests the approval-requiring tool first, optionally alongside one that needs no approval,
+/// then answers with fixed text.
 private struct ApprovalScriptedClient: AgentCapableClient {
     typealias Model = String
     let includePlainTool: Bool
@@ -85,9 +86,9 @@ struct ToolApprovalTests {
         #expect(name == "follow_shops")
         #expect(request.summary == "2 店舗をフォローします")
         #expect(request.details == ["A", "B"].map { "\($0)ストア" })
-        // 実行されていない
+        // Nothing ran.
         #expect(recorder.executed.isEmpty)
-        // トランスクリプト末尾は未解決の toolUses(再開の起点)
+        // The transcript ends on the unresolved tool calls, which is where a resume picks up.
         #expect(transcript.last?.role == .assistant)
     }
 
@@ -108,7 +109,7 @@ struct ToolApprovalTests {
         ) { events.append($0) }
 
         #expect(recorder.executed == ["follow_shops"])
-        // .toolCall の再発行なし、.toolResult → .completed の順
+        // No repeated toolCall; the order is toolResult then completed.
         #expect(!events.contains { if case .toolCall = $0 { true } else { false } })
         guard case .toolResult(let id, _, let output, let isError) = events.first else {
             Issue.record("expected toolResult first, got \(events)")
@@ -163,7 +164,7 @@ struct ToolApprovalTests {
         )
         var firstRunEvents: [AgentLoop<ApprovalScriptedClient>.Event] = []
         let suspended = try await loop.run(messages: [.user("フォローして")]) { firstRunEvents.append($0) }
-        // 部分実行なし
+        // The whole batch was held back, not just the tool needing approval.
         #expect(recorder.executed.isEmpty)
 
         var events: [AgentLoop<ApprovalScriptedClient>.Event] = []
@@ -173,7 +174,7 @@ struct ToolApprovalTests {
         ) { events.append($0) }
 
         #expect(Set(recorder.executed) == ["follow_shops", "plain_tool"])
-        // 裁定対象外(plain_tool)には .toolCall が発行される
+        // A tool with no verdict runs as a normal call, so its toolCall is emitted.
         #expect(events.contains { if case .toolCall(_, let name, _) = $0 { name == "plain_tool" } else { false } })
     }
 }

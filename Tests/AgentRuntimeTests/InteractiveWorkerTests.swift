@@ -11,22 +11,21 @@ import A2AInProcess
 
 private enum MockError: Error { case unused }
 
-/// 会話に assistant メッセージが無ければ（初回）`request_user_input` を呼び、
-/// あれば（resume）最新ユーザー入力で完了する scripted LLM クライアント。
+/// Asks for input on the first step, then answers using whatever the user replied.
 private struct InteractiveMockClient: AgentCapableClient {
     typealias Model = String
 
     func executeAgentStep(messages: [LLMMessage], model: String, systemPrompt: SystemPrompt?, tools: ToolSet, toolChoice: ToolChoice?, responseSchema: JSONSchema?, thinkingMode: ThinkingMode, reasoningEffort: ReasoningEffort?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> LLMResponse {
         let hasPriorAssistantTurn = messages.contains { $0.role == .assistant }
         if hasPriorAssistantTurn {
-            // resume: 最新ユーザー入力（都市名）で回答
+            // Resuming: answer from the newest user message.
             let city = messages.last?.contents.compactMap { content -> String? in
                 if case .text(let t) = content { return t }
                 return nil
             }.joined() ?? ""
             return LLMResponse(content: [.text("Weather for \(city): sunny")], model: "mock", usage: TokenUsage(inputTokens: 0, outputTokens: 0), stopReason: .endTurn)
         }
-        // 初回: ユーザーに都市を尋ねる
+        // First step: ask instead of guessing.
         let input = try JSONEncoder().encode(["question": "Which city?"])
         return LLMResponse(content: [.toolUse(id: "c1", name: "request_user_input", input: input)], model: "mock", usage: TokenUsage(inputTokens: 0, outputTokens: 0), stopReason: .toolUse)
     }

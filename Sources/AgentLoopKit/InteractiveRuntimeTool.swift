@@ -2,12 +2,17 @@ import LLMClient
 import LLMTool
 import Foundation
 
-/// 呼ばれると `AgentLoop` がループを中断し `.inputRequired` を発する対話ツールのマーカー。
+/// Marks a tool that stops the turn to ask the user something.
+///
+/// The loop never calls `execute` on one of these. When the model requests it, the loop reports
+/// the question and returns, so anything the tool body would do will not happen.
 public protocol InteractiveRuntimeTool: Tool {
+    /// Extracts the question to show the user from the model's raw arguments.
+    /// Called instead of executing the tool, so it must not have side effects.
     func question(from argumentsData: Data) -> String
 }
 
-/// 標準の対話ツール（a2a-samples の `require_user_input` 相当）。
+/// The stock way to let a model ask the user a clarifying question and pause the turn.
 public struct RequestUserInputTool: InteractiveRuntimeTool {
     public init() {}
 

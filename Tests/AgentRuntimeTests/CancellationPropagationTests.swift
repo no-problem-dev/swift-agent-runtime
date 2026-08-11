@@ -9,7 +9,7 @@ import A2AInProcess
 
 private enum MockError: Error { case unused }
 
-/// ワーカーの実行開始とキャンセルを記録するフラグ。
+/// Records that the worker started, and separately that it observed cancellation.
 private actor CancelFlag {
     private(set) var cancelled = false
     private(set) var started = false
@@ -17,8 +17,7 @@ private actor CancelFlag {
     func markStarted() { started = true }
 }
 
-/// executeAgentStep でキャンセルされるまで停止するワーカー用クライアント。
-/// 構造化キャンセルがツリーを伝播すれば、ここで CancellationError を観測する。
+/// Hangs until cancelled. If cancellation propagates down the tree, it is observed here.
 private struct HangingWorkerClient: AgentCapableClient {
     typealias Model = String
     let flag: CancelFlag
@@ -39,7 +38,7 @@ private struct HangingWorkerClient: AgentCapableClient {
     func planToolCalls(messages: [LLMMessage], model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> ToolCallResponse { throw MockError.unused }
 }
 
-/// 常に指定ワーカーへ委譲するオーケストレータ用クライアント。
+/// Host side: always delegates to the named worker and never answers on its own.
 private struct AlwaysDelegateClient: AgentCapableClient {
     typealias Model = String
     let target: String
@@ -72,22 +71,22 @@ struct CancellationPropagationTests {
         let session = HostAgent(client: AlwaysDelegateClient(target: "worker"), model: "mock", registry: registry, maxSteps: 4)
 
         let runTask = Task { try await session.run("do it") }
-        // ワーカーが実際にハング地点（Task.sleep）へ到達するまで決定論的に待つ。
+        // Wait for the worker to actually reach its hang point rather than guessing at a delay.
         for _ in 0..<400 where await !flag.started {
             try await Task.sleep(for: .milliseconds(5))
         }
         #expect(await flag.started)
         runTask.cancel()
 
-        // run はキャンセルで終わる。
+        // The run ends by throwing rather than producing an answer.
         do {
             _ = try await runTask.value
             Issue.record("expected cancellation to propagate")
         } catch {
-            // 期待どおり（CancellationError）
+            // Expected.
         }
 
-        // 委譲先の実行中ワーカーまでキャンセルが伝播していること。
+        // And it reached the worker that was mid-execution, not just the host.
         #expect(await flag.cancelled)
     }
 }

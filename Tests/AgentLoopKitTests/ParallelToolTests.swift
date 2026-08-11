@@ -7,7 +7,7 @@ import Testing
 
 private enum MockError: Error { case unused }
 
-/// 同時実行数を追跡し、最大同時数を記録する（並列ならツール実行が重なる）。
+/// Tracks the high-water mark of concurrent tool executions.
 private actor ConcurrencyTracker {
     private var current = 0
     private(set) var maxConcurrent = 0
@@ -15,7 +15,7 @@ private actor ConcurrencyTracker {
     func exit() { current -= 1 }
 }
 
-/// 実行時に enter → 短い sleep（重なり窓を作る）→ exit し、名前を返すツール。
+/// Holds the tracker open across a short sleep, so overlapping executions are observable.
 private struct TrackTool: Tool {
     let name: String
     let tracker: ConcurrencyTracker
@@ -30,7 +30,7 @@ private struct TrackTool: Tool {
     }
 }
 
-/// 1 ターン目で 2 つのツールを同時に呼び、結果が返ったら完了する。
+/// Requests two tools in one step, then finishes once their results come back.
 private struct TwoToolClient: AgentCapableClient {
     typealias Model = String
     func executeAgentStep(messages: [LLMMessage], model: String, systemPrompt: SystemPrompt?, tools: ToolSet, toolChoice: ToolChoice?, responseSchema: JSONSchema?, thinkingMode: ThinkingMode, reasoningEffort: ReasoningEffort?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> LLMResponse {
@@ -77,8 +77,8 @@ struct ParallelToolTests {
         }
 
         #expect(final == "done")
-        #expect(toolResults == ["toolA", "toolB"])     // 呼び出し順に整列
-        #expect(await tracker.maxConcurrent == 2)       // 2 つが同時に走った
+        #expect(toolResults == ["toolA", "toolB"])     // reordered to match the call order
+        #expect(await tracker.maxConcurrent == 2)       // both were in flight at once
     }
 
     @Test("parallelToolExecution: false なら逐次（最大同時数 1）")
@@ -98,6 +98,6 @@ struct ParallelToolTests {
 
         #expect(final == "done")
         #expect(toolResults == ["toolA", "toolB"])
-        #expect(await tracker.maxConcurrent == 1)       // 重ならない
+        #expect(await tracker.maxConcurrent == 1)       // never overlapped
     }
 }

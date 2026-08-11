@@ -2,25 +2,23 @@ import Foundation
 import ACPCore
 import LLMClient
 
-/// ACP の `session/update` 語彙に射影したエージェントループ拡張。
+/// Projects loop events onto the ACP `session/update` vocabulary.
 ///
-/// `session/update` は全エージェントステップを報告する標準的なテスト可能面であり、
-/// クライアントが描画の唯一の情報源として使う想定。
-/// ループの意味論イベント — thought・ツール呼び出し（`kind`・`rawInput`・可読 `title`）・
-/// その結果（`content` + `rawOutput`）・message — を射影し、
-/// ツール呼び出し ID を保持して更新を相関付ける。
+/// A client can render from these updates alone: thoughts, tool calls (with a kind, a readable
+/// title and the raw input), their results, and messages. Tool call ids are carried through, so a
+/// call and its later update correlate.
 ///
-/// コストは意味論イベントではない（`AgentEvent`/`AgentTelemetry` 参照）:
-/// ステップごとのトークン使用量は `AgentTelemetry` metrics sink へ流れる。
-/// ACP 対応物の `usage_update` は ACP 境界（`HostACPAgent`）で telemetry から射影され、
-/// このイベント語彙からは射影しない — 意味論ストリームを metrics から切り離すため。
-/// レンダリング済み system prompt は一切発行しない。
+/// Token usage is deliberately absent. Its ACP counterpart, `usage_update`, is projected from the
+/// telemetry sink at the ACP boundary instead, which keeps this stream free of metrics. The
+/// rendered system prompt is never emitted at all.
 public extension AgentLoop {
+    /// Maps one event to its ACP update, or `nil` for events with no ACP counterpart.
     static func sessionUpdate(for event: Event) -> SessionUpdate? {
         switch event {
         case let .textDelta(delta):
-            // ACP のチャンクは増分が前提。テキストはデルタで届く契約（非ストリーミング
-            // プロバイダでも全文 1 デルタが保証される）なので、ここが唯一のテキスト射影。
+            // ACP chunks are incremental, and every step's text is guaranteed to arrive as deltas
+            // (a non-streaming provider still sends one whole-text delta), so this is the only
+            // place text is projected.
             return .agentMessageChunk(ContentChunk(content: .text(TextContent(text: delta))))
         case let .thinkingDelta(delta):
             return .agentThoughtChunk(ContentChunk(content: .text(TextContent(text: delta))))
@@ -40,19 +38,22 @@ public extension AgentLoop {
                 rawOutput: .string(output)
             ))
         case let .toolApprovalRequired(_, _, _, request):
-            // ACP session/update に承認語彙はないため、要約を agent message として提示する。
+            // ACP has no approval vocabulary, so the summary is shown as an agent message.
+            // A client driven only by these updates therefore has no way to send a verdict back.
             return .agentMessageChunk(ContentChunk(content: .text(TextContent(text: request.summary))))
         case let .inputRequired(question):
             return .agentMessageChunk(ContentChunk(content: .text(TextContent(text: question))))
         case .completed:
-            // テキストは textDelta が全量を運ぶ。completed はターン終端マーカーであり、
-            // ここで text を再射影すると二重表示になる。
+            // The deltas already carried the whole text; projecting it again would show it twice.
             return nil
         }
     }
 
-    /// ループの進捗を ACP `session/update` のストリームとして返す。
-    /// ACP ネイティブな面。`run(messages:onEvent:)` は telemetry（usage 内訳）も運ぶ詳細な内部射影として残る。
+    /// Runs the loop and streams its progress as ACP updates.
+    ///
+    /// The work happens in an unstructured task, so this does not inherit the caller's
+    /// cancellation — terminating the stream is what stops the loop. Nothing here reports token
+    /// usage; use `run(messages:onEvent:)` with a telemetry sink when that is needed.
     func updates(messages: [LLMMessage]) -> AsyncThrowingStream<SessionUpdate, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -72,11 +73,12 @@ public extension AgentLoop {
     }
 }
 
-/// ツール名を ACP `tool_call` の表示情報（kind + title）にマップし、生ツール入力を `JSONValue` にデコードする。
-/// 名前ベースのヒューリスティックで動くため、ツールごとのレジストリなしに
-/// ホスト委譲ツールもワーカーツールも扱える。
+/// Derives a tool call's ACP display information from its name alone.
+///
+/// Working from the name means delegation tools and worker tools are both covered without any
+/// per-tool registration — at the cost of guessing, so an unusual name gets a generic kind.
 enum ACPToolMapping {
-    /// ツール名 → ACP `ToolKind`。クライアントがアイコンを選ぶ用。未知の名前は `.other` にフォールバック。
+    /// Picks the icon category a client shows for a tool. Unrecognised names fall back to `.other`.
     static func kind(forToolNamed name: String) -> ToolKind {
         let n = name.lowercased()
         // Sub-agent delegation: an opaque sub-agent invocation reads as "agent
@@ -94,16 +96,16 @@ enum ACPToolMapping {
         return .other
     }
 
-    /// ツール名 → 可読な `title`（例: `send_message` → "Send message"）。
-    /// クライアントが独自にローカライズ可能。ワイヤ上のデフォルトとして妥当な値を提供する。
+    /// Turns a tool name into a readable label, for example `send_message` into "Send message".
+    /// English only — a client that needs another language should localise from the tool name.
     static func title(forToolNamed name: String) -> String {
         let spaced = name.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
         guard let first = spaced.first else { return name }
         return first.uppercased() + spaced.dropFirst()
     }
 
-    /// 生ツール呼び出し入力（JSON `Data`）を ACP `JSONValue` にデコードする。
-    /// 入力が空か JSON として不正な場合は `nil` を返す。
+    /// Decodes the raw tool arguments for display. Returns `nil` when the input is empty or not
+    /// valid JSON — the update is still sent, just without its raw input.
     static func jsonValue(from input: Data) -> JSONValue? {
         guard !input.isEmpty else { return nil }
         return try? JSONDecoder().decode(JSONValue.self, from: input)

@@ -14,7 +14,7 @@ private actor CancelFlag {
     func mark() { cancelled = true }
 }
 
-/// input-required で中断する手書きワーカー（キャンセル対象を非終端にする）。
+/// Stops waiting on user input, which leaves the task non-terminal and therefore cancellable.
 private struct PausingExecutor: AgentExecutor {
     func execute(_ context: RequestContext, eventQueue: EventQueue) async throws {
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
@@ -27,7 +27,7 @@ private struct PausingExecutor: AgentExecutor {
     }
 }
 
-/// executeAgentStep で停止し続けるワーカー用クライアント。
+/// Hangs mid-step and records whether cancellation ever reached it.
 private struct HangingWorkerClient: AgentCapableClient {
     typealias Model = String
     let flag: CancelFlag
@@ -71,8 +71,8 @@ struct CancelAPITests {
         let card = makeCard("weather")
         await registry.register(card: card, handler: DefaultRequestHandler(agentCard: card, executor: PausingExecutor()))
 
-        #expect(await registry.cancel("weather") == nil)   // まだ送っていない（taskId 無し）
-        #expect(await registry.cancel("ghost") == nil)      // 未登録
+        #expect(await registry.cancel("weather") == nil)   // nothing sent yet, so no task
+        #expect(await registry.cancel("ghost") == nil)      // not registered at all
 
         let outcome = try await registry.send(to: "weather", text: "go")
         #expect(outcome.state == .inputRequired)
@@ -92,9 +92,9 @@ struct CancelAPITests {
         let registry = AgentConnectionRegistry()
         let card = makeCard("done")
         await registry.register(card: card, handler: DefaultRequestHandler(agentCard: card, executor: Done()))
-        _ = try await registry.send(to: "done", text: "go")   // 完了 → taskId は終端
+        _ = try await registry.send(to: "done", text: "go")   // already terminal
 
-        await registry.cancelAll()   // throw しなければ OK
+        await registry.cancelAll()   // cancelling a finished worker must not throw
     }
 
     @Test("session.cancel() は in-flight run を止め、委譲中の実行ワーカーも停止する")
@@ -107,7 +107,7 @@ struct CancelAPITests {
         let session = HostAgent(client: AlwaysDelegateClient(target: "worker"), model: "mock", registry: registry, maxSteps: 4)
 
         let runTask = Task { try await session.run("do it") }
-        try await Task.sleep(for: .milliseconds(100))   // ワーカーが hang するまで待つ
+        try await Task.sleep(for: .milliseconds(100))   // let the worker reach its hang point
 
         await session.cancel()
 
@@ -115,7 +115,7 @@ struct CancelAPITests {
             _ = try await runTask.value
             Issue.record("expected run to be cancelled")
         } catch {
-            // 期待どおり
+            // Expected: the run threw rather than returning a value.
         }
         #expect(await flag.cancelled)
     }

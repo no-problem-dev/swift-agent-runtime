@@ -7,7 +7,7 @@ import Testing
 
 private enum MockError: Error { case unused }
 
-/// TranscriptAwareTool が受け取ったトランスクリプトを記録する。
+/// Records the transcript handed to a transcript-aware tool at execution time.
 private actor TranscriptStore {
     var transcripts: [[LLMMessage]] = []
     func record(_ transcript: [LLMMessage]) { transcripts.append(transcript) }
@@ -28,7 +28,7 @@ private struct ProbeTranscriptTool: TranscriptAwareTool {
     }
 }
 
-/// 1 ステップ目: search ツール → 2 ステップ目: probe ツール → 3 ステップ目: 完了テキスト。
+/// Calls search, then probe, then finishes — so probe runs with a real prior result in scope.
 private struct TwoStepClient: AgentCapableClient {
     typealias Model = String
 
@@ -72,13 +72,13 @@ struct TranscriptSupplyTests {
         try await loop.run(messages: [.user("鶏むね肉")]) { _ in }
 
         let transcript = try #require(await store.transcripts.first)
-        // probe 実行時点: user + assistant(search) + tool(search 結果) + assistant(probe) の 4 件
+        // At probe time: user, assistant(search), the search result, assistant(probe).
         #expect(transcript.count == 4)
-        // 先に完了した search の結果(本物のデータ)が見える
+        // The earlier tool's real output is visible, not a placeholder.
         let toolResultMessages = transcript.filter { !$0.toolResults.isEmpty }
         #expect(toolResultMessages.count == 1)
         #expect("\(toolResultMessages[0].contents)".contains("207505149046817824"))
-        // 末尾は実行中の probe 呼び出しを含む assistant メッセージ(未解決 — 除去はツール側の責務)
+        // The tail is the still-unresolved call to probe itself; dropping it is the tool's job.
         let last = try #require(transcript.last)
         #expect(last.role == .assistant)
         #expect("\(last.contents)".contains("probe"))

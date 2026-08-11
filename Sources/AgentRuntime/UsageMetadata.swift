@@ -3,11 +3,12 @@ import A2ACore
 import StructuredDataCore
 import LLMClient
 
-/// ワーカー（サブエージェント）の LLM トークン使用量を A2A メタデータに載せて運ぶための変換。
+/// Carries a worker's token usage back to its caller inside artifact metadata.
 ///
-/// A2A の `StreamResponse` には usage 専用イベントが無いため、委譲結果の artifact metadata に
-/// `TokenUsage` を JSON 文字列として格納し、`delegate(...)` 側で取り出してコスト集計に合算する。
-/// in-process でも remote でも同じ経路で運べる（トランスポート非依存）。
+/// A2A has no event for usage, so the numbers ride along as a JSON string on the artifact the
+/// worker produces and are read back out when the delegation finishes. The same path works
+/// in-process and over the wire. Encoding and decoding both fail to `nil`: a worker whose usage
+/// does not round-trip simply reports none, which shows up as a gap in the cost total.
 enum UsageMetadata {
     static let key = "llm.usage"
 

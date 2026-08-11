@@ -5,27 +5,26 @@ import LLMTool
 import LLMAgentStep
 import Foundation
 
-/// ルーター型ホスト（公式 A2UI orchestrator サンプル `samples/agent/adk/orchestrator` 相当）。
+/// A host that forwards a message to exactly one worker and passes the reply straight back.
 ///
-/// `HostAgent`（委譲ループ型: ワーカー結果を集約し自分で最終出力を合成する）と異なり、
-/// 責務はルーティングのみ。受信メッセージを 1 回の推論 — または `hooks.preRoute` による
-/// 決定的判定 — でちょうど 1 ワーカーへ転送し、ワーカーの応答イベントを**再合成せず
-/// パススルー**する。UI カタログ等のドメイン知識は一切持たないため、system prompt は
-/// 公式逐語のルーティング 1 文 + ロスターだけで済む。
+/// Use this instead of the aggregating host when the worker's output is structured and must reach
+/// the client intact — the aggregating host joins everything into text, which destroys it. The
+/// router never composes an answer of its own, so its prompt is one routing sentence plus the
+/// roster, and it holds no domain knowledge at all.
 ///
-/// A2UI 連携は `Hooks` として注入する（公式サンプルとの対応）:
-/// - `preRoute` ← `before_model_callback`（userAction の surfaceId ルーティング）
-/// - `prepareOutbound` ← `A2UIMetadataInterceptor`（capabilities 注入 + data model ストリッピング）
-/// - `observeWorkerParts` ← `agent_executor` のイベント観測（surface 所有の記録）
+/// Routing costs one model call per message, unless a hook decides without the model.
 public actor RouterHostAgent<Client: AgentCapableClient> where Client.Model: Sendable {
 
+    /// Where domain-specific behaviour is injected, keeping the router itself generic.
     public struct Hooks: Sendable {
-        /// LLM を介さない決定的ルーティング。受信パーツから転送先ワーカー名を返す。
-        /// `nil` = LLM ルーティングへフォールバック（公式の `return None` と同じ意味論）。
+        /// Decides the target without asking the model. Return `nil` to fall back to the model,
+        /// which is the default. Use it when the message already says where it belongs.
         public var preRoute: @Sendable ([Part]) async -> String?
-        /// 転送直前の message metadata 変換。
+        /// Rewrites the message metadata just before it goes out, once the target is known.
+        /// Throwing here aborts the send after routing has already been reported.
         public var prepareOutbound: @Sendable (A2AMetadata?, _ target: String) async throws -> A2AMetadata?
-        /// ワーカー応答パーツの観測。`agent` はワーカー名（公式の `event.author`）。
+        /// Observes the worker's reply parts as they stream by. Called before the parts are
+        /// yielded onward, so a slow hook delays the client.
         public var observeWorkerParts: @Sendable ([Part], _ agent: String) async -> Void
 
         public init(
@@ -40,9 +39,10 @@ public actor RouterHostAgent<Client: AgentCapableClient> where Client.Model: Sen
     }
 
     public enum Event: Sendable {
-        /// ルーティング決定。`deterministic` = LLM を介さず決定（userAction ルート等）。
+        /// The target was chosen. `deterministic` means a hook decided and no model call happened,
+        /// which is also why `usage` is `nil` in that case.
         case routed(agent: String, deterministic: Bool, usage: TokenUsage?)
-        /// ワーカーからのパススルーイベント。
+        /// A worker event, forwarded unchanged.
         case worker(StreamResponse)
     }
 
@@ -70,27 +70,36 @@ public actor RouterHostAgent<Client: AgentCapableClient> where Client.Model: Sen
         self.cachePolicy = cachePolicy
     }
 
-    /// 現在のルーティング会話履歴（ユーザー入力とワーカー応答の要約を含む）。
+    /// The routing conversation: each user message and a summary of what the worker replied.
+    /// Kept so the next routing decision can see the flow of the conversation, not the full
+    /// worker output. Grows with every message; nothing trims it.
     public var messages: [LLMMessage] { history }
 
-    /// ルーティング会話履歴をリセットする。次の `send` は新規セッションとして開始する。
+    /// Forgets the routing conversation. The next message is routed without prior context.
     public func clear() {
         history.removeAll()
     }
 
-    /// 進行中の委譲タスクをキャンセルする。
+    /// Asks every worker to stop. Does not interrupt a routing decision already in flight — end
+    /// the stream for that.
     public func cancel() async {
         await registry.cancelAll()
     }
 
-    /// セッション終了処理。明示プロンプトキャッシュを保持するクライアントのキャッシュを解放する。
+    /// Releases server-side prompt caches held by the client, where the provider bills for them.
+    /// Does nothing for clients without that concept.
     public func close() async {
         if let releasing = client as? PromptCacheReleasing {
             await releasing.releasePromptCaches()
         }
     }
 
-    /// メッセージをちょうど 1 ワーカーへ転送し、応答イベントをパススルーで流す。
+    /// Routes one message to a single worker and streams the reply through unchanged.
+    ///
+    /// The work runs in an unstructured task, so it does not inherit the caller's cancellation —
+    /// terminating the stream is what stops it. An unknown target, a model that produced no
+    /// routing decision, or a throwing outbound hook all surface as an error on the stream.
+    /// History is only appended once the worker's stream ends, so a failed send leaves it clean.
     public func send(_ parts: [Part], metadata: A2AMetadata? = nil) -> AsyncThrowingStream<Event, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -141,17 +150,17 @@ public actor RouterHostAgent<Client: AgentCapableClient> where Client.Model: Sen
             yield(.worker(event))
         }
 
-        // ルーティング文脈として履歴を保持（公式も transfer 後のサブエージェントイベントが
-        // orchestrator セッションに残る）。次ターンの転送先判断が会話の流れを参照できる。
+        // Keep the exchange as routing context, summarised rather than verbatim: the next
+        // decision needs the shape of the conversation, not the worker's full output.
         history.append(try Self.userMessage(for: parts))
         let workerText = workerTexts.joined(separator: "\n")
         history.append(.assistant("[\(target)] \(workerText.isEmpty ? "(no text)" : workerText)"))
     }
 
-    // MARK: - LLM routing (mirror of the official orchestrator LlmAgent)
+    // MARK: - Model routing
 
-    /// 公式 orchestrator の instruction（逐語）。可変部はロスターのみ
-    /// （公式では ADK が sub_agents の description を文脈として供給する部分に相当）。
+    /// The routing prompt: one sentence plus the roster, and nothing else. The worker descriptions
+    /// are the only thing the model has to route on, so they carry the whole decision.
     static func instruction(roster: String) -> String {
         """
         You are an orchestrator agent. Your sole responsibility is to analyze the incoming user request, determine the user's intent, and route the task to exactly one of your expert subagents
@@ -172,7 +181,8 @@ public actor RouterHostAgent<Client: AgentCapableClient> where Client.Model: Sen
                 required: ["agent_name"]
             )
         }
-        // planToolCalls 専用（呼び出しの計画だけ読み、実行はルーターが転送として担う）。
+        // Only ever planned, never executed: the router reads the intended call and forwards the
+        // message itself. Reaching this body means the tool escaped into a real loop.
         func execute(with argumentsData: Data) async throws -> ToolResult {
             .error("transfer_to_agent is handled by the router, not executed as a tool")
         }
@@ -218,14 +228,14 @@ public actor RouterHostAgent<Client: AgentCapableClient> where Client.Model: Sen
         }
     }
 
-    /// パーツを LLM 入力 `LLMMessage` へ。画像（`.bytes` + image/*）を貫通させ、テキストのみなら
-    /// `historyText` と同一テキストの `.user(String)` を返す（ルーティング挙動の回帰なし）。
+    /// Builds the routing input, carrying images through. Text-only messages produce exactly what
+    /// the text-only path produced before attachments existed, so routing behaviour is unchanged.
     private static func userMessage(for parts: [Part]) throws -> LLMMessage {
         try MultimodalInput.userMessage(from: parts)
     }
 
-    /// パーツを LLM 文脈用テキストへ。テキストは逐語、構造化データはパートごと JSON 化
-    /// （公式 part_converters が A2UI part を `model_dump_json` で text 化するのと同じ）。
+    /// Renders worker parts as text for the routing history. Structured data becomes JSON; bytes
+    /// and links are dropped, since the history exists to inform routing, not to preserve output.
     private static func historyText(for parts: [Part]) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]

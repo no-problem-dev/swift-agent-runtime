@@ -12,7 +12,7 @@ import A2AServer
 
 private enum MockError: Error { case unused }
 
-/// ルーティング推論モック: 常に transfer_to_agent(targetName) を計画する。
+/// Always plans a transfer to the named worker, so routing is deterministic.
 private struct RoutingPlanClient: AgentCapableClient {
     typealias Model = String
     let targetName: String
@@ -41,7 +41,7 @@ private struct RoutingPlanClient: AgentCapableClient {
     func planToolCalls(prompt: String, model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> ToolCallResponse { throw MockError.unused }
 }
 
-/// LLM が一切呼ばれないことを証明するモック: 全メソッドが throw。
+/// Throws from every method, so any use of the model fails the test rather than passing quietly.
 private struct NeverCalledClient: AgentCapableClient {
     typealias Model = String
     struct Unexpected: Error {}
@@ -61,7 +61,7 @@ private struct NeverCalledClient: AgentCapableClient {
     func planToolCalls(prompt: String, model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> ToolCallResponse { throw Unexpected() }
 }
 
-/// 受信メッセージを記録し、テキスト + 構造化データパートを artifact として返すワーカー。
+/// Keeps what the worker actually received, so outbound rewriting can be checked at the far end.
 private actor ReceivedMessages {
     private(set) var messages: [Message] = []
     func append(_ message: Message?) {
@@ -139,11 +139,11 @@ struct RouterHostAgentTests {
         #expect(routed.count == 1)
         #expect(routed.first?.agent == "alpha")
         #expect(routed.first?.deterministic == false)
-        // 構造化パートが平坦化されずパススルーされる
+        // The structured part survived: it was passed through, not flattened to text.
         #expect(workerParts.contains { $0.mediaType == "application/a2ui+json" })
         #expect(workerParts.contains { $0.text == "done" })
 
-        // ルーティング文脈の履歴が積まれる
+        // The exchange was recorded as routing context for the next message.
         let history = await router.messages
         #expect(history.count == 2)
     }
@@ -151,7 +151,7 @@ struct RouterHostAgentTests {
     @Test func preRouteBypassesLLM() async throws {
         let (registry, _) = await makeRegistry(replyParts: [.text("ok")])
         let hooks = RouterHostAgent<NeverCalledClient>.Hooks(preRoute: { _ in "alpha" })
-        // LLM が呼ばれたら NeverCalledClient.Unexpected で必ず失敗する
+        // Any model call would throw, so passing proves the hook decided on its own.
         let router = RouterHostAgent(client: NeverCalledClient(), model: "mock", registry: registry, hooks: hooks)
 
         let (routed, _) = try await collect(router.send([.text("tap")]))
@@ -174,7 +174,7 @@ struct RouterHostAgentTests {
         #expect(messages.count == 1)
         #expect(messages.first?.metadata?["routedTo"]?.stringValue == "alpha")
         #expect(messages.first?.metadata?["trace"]?.stringValue == "t1")
-        // パーツも保存されている（テキスト 1 パート）
+        // Rewriting the metadata left the parts untouched.
         #expect(messages.first?.parts.first?.text == "hello")
     }
 

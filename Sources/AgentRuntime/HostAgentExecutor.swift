@@ -5,10 +5,14 @@ import LLMClient
 import LLMTool
 import LLMAgentStep
 
-/// `HostAgent`（オーケストレータ）を A2A の `AgentExecutor` として公開するアダプタ。
+/// Exposes an orchestrator as an A2A worker, so orchestrators can nest.
 ///
-/// これにより上位オーケストレータのワーカーとして登録でき、入れ子のオーケストレーションが組める。
-/// A2A の `contextId` ごとにセッションを保持し、会話を分離・継続する。
+/// One host is created per context id and kept for the lifetime of this executor: conversations
+/// stay separate, and a follow-up on the same context continues where it left off. Nothing
+/// evicts a context, so a long-lived executor accumulates one host per conversation it has seen.
+///
+/// A turn that throws is reported as a failed task rather than propagated, so the caller sees the
+/// error as text on the task and this method still returns normally.
 public actor HostAgentExecutor<Client: AgentCapableClient>: AgentExecutor where Client.Model: Sendable {
     private let makeHost: @Sendable () -> HostAgent<Client>
     private let artifactName: String
@@ -25,8 +29,9 @@ public actor HostAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
 
         let host = hostFor(context.contextId)
         var finalText = ""
-        // 進行中ステップのテキストデルタ蓄積。ツール呼び出し時に 1 回で掲示する
-        // （チャンクごとの status 更新は A2A ではノイズになるため）。
+        // Deltas are buffered and posted as one status update when a tool call comes along:
+        // a status update per chunk is noise on the A2A wire. The buffer is bounded by the
+        // step's own text, and is dropped rather than posted if the turn ends without a tool call.
         var stepText = ""
         do {
             for try await event in await host.stream(context.userInput()) {
@@ -42,7 +47,8 @@ public actor HostAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                 case .completed(let text):
                     finalText = text
                 case .toolApprovalRequired(_, _, _, let request):
-                    // A2A ホスト実行には承認 UI がないため、要求内容を報告して中断扱いにする
+                    // There is no approval UI on this path, so the request is only reported as
+                    // text. Nothing here can send a verdict back, and the tool never runs.
                     try await updater.updateStatus(.working, message: updater.makeAgentMessage([.text(request.summary)]))
                 case .toolResult, .inputRequired, .thinkingDelta:
                     break

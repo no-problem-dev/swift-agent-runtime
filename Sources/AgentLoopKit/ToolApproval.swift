@@ -1,24 +1,25 @@
 import Foundation
 import LLMTool
 
-/// 実行前にユーザー承認を要するツールのマーカー。
+/// Marks a tool the user must approve before it runs.
 ///
-/// `AgentLoop` は該当ツールの呼び出しを含むステップで**実行せずに中断**し、
-/// `.toolApprovalRequired` を発してトランスクリプトを返す(`InteractiveRuntimeTool`
-/// と同じ中断モデル)。ホストはユーザーの裁定を集め、同じトランスクリプトと
-/// `pendingToolDecisions` で `run` を再開する。
+/// A step that requests one of these stops before executing anything — including the tools in the
+/// same batch that need no approval, so no partial work happens. The loop returns the transcript
+/// with those calls still unresolved; collect the user's verdicts and call `run` again with the
+/// same transcript and `pendingToolDecisions`.
 public protocol ApprovalRequiringTool: Tool {
-    /// この呼び出しに承認が必要なら、ユーザーへ提示する承認要求を返す。
-    /// `nil` は「この引数では承認不要」(即実行)。
-    /// 表示情報の解決(ID → 名前等)のため async。
+    /// Returns what to show the user, or `nil` to run immediately without asking.
+    ///
+    /// Deciding per call means a tool can require approval only for the destructive arguments.
+    /// Async so the summary can resolve identifiers into names; it must not perform the action.
     func approvalRequest(from argumentsData: Data) async -> ToolApprovalRequest?
 }
 
-/// ユーザーへ提示する承認要求(表示用)。
+/// What the user is shown before a tool runs.
 public struct ToolApprovalRequest: Sendable, Equatable {
-    /// 何をするかの 1 行要約(例: 「3 店舗をフォローします」)。
+    /// One line stating what will happen if approved.
     public var summary: String
-    /// 明細(例: 店舗名の一覧)。
+    /// The individual items the action will touch, listed under the summary.
     public var details: [String]
 
     public init(summary: String, details: [String] = []) {
@@ -27,14 +28,14 @@ public struct ToolApprovalRequest: Sendable, Equatable {
     }
 }
 
-/// 保留中ツール呼び出しへのユーザー裁定。
+/// The user's verdict on a tool call that is waiting for approval.
 public enum ToolApprovalDecision: Sendable, Equatable {
     case approved
     case denied
 }
 
 extension ToolApprovalDecision {
-    /// 拒否時にモデルへ返すツール結果。エラーではなく通常の結果として返す
-    /// (エラー扱いにするとモデルが再試行しうるため)。
+    /// The tool result fed back for a denied call. Sent as a success, not an error, because an
+    /// error reads to the model as something to retry.
     static let deniedResultPayload = #"{"declined":true,"message":"The user declined to run this tool. Do not retry; acknowledge and continue."}"#
 }

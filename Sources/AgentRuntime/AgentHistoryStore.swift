@@ -1,23 +1,23 @@
 import LLMClient
 import Foundation
 
-/// ワーカーエージェントの LLM 会話履歴ストア（公式 ADK の SessionService 相当）。
+/// Keeps a worker's conversation in the model's own message types, one conversation per context.
 ///
-/// `AgentLoop` の transcript — tool call / tool result をネイティブな型のまま含む
-/// `[LLMMessage]` — を contextId 単位で保持する。A2A タスク履歴（テキスト化された
-/// プロトコル上の記録）から会話を復元すると、過去のツール呼び出しが「assistant の
-/// テキスト発話」に劣化し、モデルがそれを模倣してツールを呼ばずテキストで応答する
-/// 事故が起きる。履歴はエージェントの私有物としてネイティブのまま持つのが正:
-/// 公式サンプルも自サーバー内の InMemorySessionService で同じことをしている。
+/// Rebuilding a conversation from the A2A task history instead loses type information: past tool
+/// calls come back as plain assistant text, and a model shown that pattern imitates it — it
+/// answers in prose where it should have called a tool. Holding the native transcript, tool calls
+/// and results included, is what prevents that.
 ///
-/// プロトコルにしてあるのは保存先の差し替えのため（公式の InMemory → Database と同型）。
-/// インメモリ実装はプロセス再起動で消える — 永続化が要る運用になったら実装を足す。
+/// Conform to swap where history lives; the built-in store keeps it in memory only.
 public protocol AgentHistoryStore: Sendable {
+    /// Returns the stored conversation, or an empty array for a context never seen before.
     func history(for contextId: String) async -> [LLMMessage]
+    /// Replaces the stored conversation wholesale. Called once per completed turn.
     func save(_ history: [LLMMessage], for contextId: String) async
 }
 
-/// 既定のインメモリ実装（公式 InMemorySessionService 相当）。
+/// The default store. Conversations live in memory and are lost when the process exits; it also
+/// grows without bound, since nothing evicts a context once it has been seen.
 public actor InMemoryAgentHistoryStore: AgentHistoryStore {
     private var histories: [String: [LLMMessage]] = [:]
 

@@ -3,29 +3,39 @@ import LLMTool
 import LLMAgentStep
 import Foundation
 
-/// swift-llm-client の `executeAgentStep` + `ToolSet` だけで動くツール実行ループ。
+/// Runs the model step, executes the tools it asks for, feeds the results back, and repeats.
 ///
-/// `run(messages:onEvent:)` は内部 Task を立てず呼び出し元のタスクで実行するため、
-/// 親タスクのキャンセルがツリーで伝播する。ストリームが要る場合のみ `events(messages:)` を使う。
+/// `run(messages:onEvent:)` starts no task of its own, so cancelling the calling task cancels the
+/// in-flight model step and every running tool. `events(messages:)` wraps the same work in an
+/// unstructured task, which does not inherit the caller's cancellation — there, only cancelling
+/// the stream stops the loop.
 public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model: Sendable {
 
-    /// エージェントが**何をしているか**の意味論イベントのみ。コスト計測・デバッグ・検証制御は
-    /// 持たない（それらは `AgentTelemetry` の sink へ流す）。
+    /// What the agent is doing. Token counts, rendered prompts and validation outcomes are not
+    /// here — those go to the telemetry sink, so UI state can be driven from this stream alone.
     public enum Event: Sendable {
-        /// アシスタントテキストの増分。表示はデルタを正とし、`completed` の `text` は
-        /// ターン終端の確定値（履歴・検証用）として扱う。非ストリーミングプロバイダでも
-        /// ステップ全文を 1 つのデルタとして必ず emit するため、消費側はデルタだけを
-        /// 見ればテキストを取りこぼさない。
+        /// The next chunk of assistant text. Render from these: a step that produced text always
+        /// emits it as deltas, even from a provider that cannot stream (the whole step arrives as
+        /// one delta), so concatenating deltas never loses text. The text on `completed` repeats
+        /// the same content for history and validation — displaying both duplicates it.
         case textDelta(String)
-        /// 思考テキストの増分（thinking 有効時のみ）。
+        /// The next chunk of reasoning text. Only arrives when thinking is enabled.
         case thinkingDelta(String)
-        /// `input` はツール呼び出しの生引数（JSON）。ACP `tool_call.rawInput` へそのまま射影する。
+        /// A tool the model asked to run, about to be executed. `input` is the raw JSON arguments
+        /// exactly as the model produced them — neither parsed nor validated by the loop.
         case toolCall(id: String, name: String, input: Data)
+        /// A finished tool call. `isError` marks a failure the model is expected to recover from:
+        /// the text is fed back as the tool result and the loop continues, it is not thrown.
         case toolResult(id: String, name: String, output: String, isError: Bool)
-        /// 承認必須ツールの呼び出し。ループは実行せずに中断している。
-        /// ホストはユーザー裁定を集め、同じトランスクリプト + `pendingToolDecisions` で再開する。
+        /// A tool that needs approval was requested. The loop stopped without running it — and
+        /// without running the other tools in the same batch, so no partial work has happened.
+        /// Collect the user's decisions and call `run` again with the returned transcript.
         case toolApprovalRequired(id: String, name: String, input: Data, request: ToolApprovalRequest)
+        /// The agent asked the user a question and stopped. Resume by calling `run` again with the
+        /// returned transcript plus the user's answer as a new message.
         case inputRequired(question: String)
+        /// The turn ended. Also emitted with empty text when the step budget ran out, so this
+        /// arriving is not by itself proof the model finished what it was asked.
         case completed(text: String)
     }
 
@@ -39,26 +49,29 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
     private let cachePolicy: PromptCachePolicy
     private let thinkingMode: ThinkingMode
     private let reasoningEffort: ReasoningEffort?
-    /// 側帯観測（systemPrompt/usage）の注入先。意味論イベントと混ぜない。
     private let telemetry: AgentTelemetrySink?
 
-    /// `AgentLoop` を初期化する。
+    /// Creates a loop bound to one client, model and tool set.
     ///
     /// - Parameters:
-    ///   - client: LLM クライアント（`AgentCapableClient`）。
-    ///   - model: 使用モデル。
-    ///   - tools: 利用可能なツール群。デフォルトは空（ツールなし）。
-    ///   - systemPrompt: システムプロンプト。`nil` の場合は日付コンテキストのみ前置する。
-    ///   - maxSteps: ツール呼び出しを含むループの最大ステップ数。上限に達すると空 `completed` を発する。デフォルト 12。
-    ///   - parallelToolExecution: 複数ツール要求を並列実行するか。`true`（デフォルト）で子タスクで同時実行し、結果を呼び出し順に整列する。`false` で逐次実行（デバッグ向け）。
-    ///   - maxTokens: LLM への最大出力トークン数。`nil` でモデルのデフォルト上限を使用する。
-    ///   - cachePolicy: system prompt と tools の安定プレフィックスに対するプロンプトキャッシュ方針。全ステップに適用される。
-    ///   - thinkingMode: 拡張思考の設定。デフォルト `.disabled`（思考トークンのコストを発生させない）。
-    ///     ストリーミング可否とは独立で、`.disabled` でもテキストデルタは流れる。
-    ///   - reasoningEffort: reasoning モデル（OpenAI GPT-5 系 / Gemini 3 系）の思考量。
-    ///     `nil`（デフォルト）でプロバイダの既定に任せる。**モデルが受け付けない段は
-    ///     プロバイダ側で近い段へ寄せられる**ので、ここでモデルを気にしなくてよい。
-    ///   - telemetry: usage / system prompt 等の観測フック。意味論イベント（`Event`）とは別の側帯で受ける。`nil` で観測なし。
+    ///   - client: The LLM client used for every step.
+    ///   - model: The model identifier passed to the client.
+    ///   - tools: Tools the model may call. Empty by default, which disables tool choice entirely.
+    ///   - systemPrompt: Prepended to every step. When `nil`, only the date line is sent.
+    ///   - maxSteps: How many model steps one `run` may take. Hitting the limit emits `completed`
+    ///     with empty text rather than throwing, so callers must not read that as success.
+    ///   - parallelToolExecution: When `true` (the default), all tools requested in one step run
+    ///     concurrently in a task group — one child task per call, with no concurrency cap — and
+    ///     their results are reordered to match the call order. `false` runs them one at a time.
+    ///   - maxTokens: Output token ceiling per step. `nil` uses the model's own default.
+    ///   - cachePolicy: Prompt caching for the stable prefix (system prompt and tool schemas).
+    ///     Applied to every step.
+    ///   - thinkingMode: Extended thinking. `.disabled` by default so no thinking tokens are
+    ///     billed. Independent of streaming: text deltas still arrive when disabled.
+    ///   - reasoningEffort: Reasoning budget for models that expose one. `nil` leaves it to the
+    ///     provider. A level the model does not accept is mapped to the nearest one it does, so
+    ///     this does not have to be matched to the model.
+    ///   - telemetry: Receives token usage and the rendered system prompt. `nil` observes nothing.
     public init(
         client: Client,
         model: Client.Model,
@@ -85,9 +98,11 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         self.telemetry = telemetry
     }
 
-    /// 知識カットオフ対策のグラウンディング行。全エージェント（ホスト・ワーカー問わず）の system prompt
-    /// 先頭に必ず前置される。AgentLoop は全 LLM エージェントの唯一の実行経路なので、ここに置くことで
-    /// 個別の組み立て忘れが起きない。
+    /// The date line that grounds the model past its knowledge cutoff.
+    ///
+    /// Every agent in the package runs through this loop, so putting the line here is what makes
+    /// it impossible for an individual agent to forget it. It is appended last, not prepended —
+    /// see `run` for why.
     static func todayContext(now: Date = Date()) -> String {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
@@ -96,8 +111,25 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         return "Today's date is \(formatter.string(from: now))."
     }
 
-    /// ループを実行し、ツール呼び出し・結果・最終 assistant 応答まで含む全トランスクリプトを返す。
-    /// 返り値をそのまま次ターンの履歴に使うと、委譲とその結果が文脈として引き継がれる。
+    /// Runs the loop and returns the full transcript, tool calls and tool results included.
+    ///
+    /// Pass the returned transcript straight back as `messages` on the next turn and the model
+    /// keeps the tool calls it already made as context. The transcript is also how a suspended
+    /// turn resumes: when the loop stops on an approval or a question, it returns with the
+    /// unresolved tool calls still at the end, and `pendingToolDecisions` resolves them.
+    ///
+    /// A tool that throws is not propagated — the error is stringified into a failed tool result
+    /// and fed back so the model can correct itself. Cancellation, however, is checked before
+    /// every step and does propagate.
+    ///
+    /// - Parameters:
+    ///   - initial: The conversation so far, ending with the new user message.
+    ///   - pendingToolDecisions: Verdicts for the tool calls left unresolved by a previous run,
+    ///     keyed by tool call id. Approved calls execute without re-emitting `toolCall`; denied
+    ///     calls are never executed and get a synthetic non-error result telling the model not to
+    ///     retry; calls absent from the map execute normally.
+    ///   - onEvent: Called in order for every event. Throwing from it aborts the run.
+    /// - Returns: The transcript including the final assistant message.
     @discardableResult
     public func run(
         messages initial: [LLMMessage],
@@ -105,9 +137,10 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         onEvent: (Event) async throws -> Void
     ) async throws -> [LLMMessage] {
         var messages = initial
-        // 承認中断からの再開: トランスクリプト末尾の未実行 toolUses を裁定に従って解決する。
-        // 承認済みは実行、拒否は辞退結果を合成、裁定対象外(同バッチの承認不要ツール)は通常実行。
-        // AG-UI の再開意味論に合わせ、承認済み呼び出しの .toolCall は再発行しない。
+        // Resuming from an approval stop: settle the unexecuted toolUses left at the end of the
+        // transcript. Approved ones run, denied ones get a synthesised decline, and ones with no
+        // verdict (the no-approval-needed tools from the same batch) run normally.
+        // Approved calls do not re-emit .toolCall — the client already showed them.
         if !pendingToolDecisions.isEmpty,
            let last = messages.last, last.role == .assistant {
             let pendingUses: [(id: String, name: String, input: Data)] = last.contents.compactMap {
@@ -128,8 +161,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                     }
                     let result: ToolResult
                     do {
-                        // TranscriptAwareTool には実行時点のメッセージ列を渡す
-                        // （末尾の未解決 toolUses メッセージの除去はツール側の責務）
+                        // A transcript-aware tool sees the messages as of this moment, including
+                        // the trailing unresolved toolUses message — dropping that is its job.
                         result = try await tools.execute(toolNamed: use.name, with: use.input, transcript: messages)
                     } catch {
                         result = .error("\(error)")
@@ -150,23 +183,23 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 }
             }
         }
-        // 日付はターン（run）ごとに評価する — 長寿命セッションが日をまたいでも正しい。
-        // ツール同伴指示（A2UI スキーマ等）は後置（ADK process_llm_request 相当）、
-        // 日付はさらにその後ろ — 日次で変わる可変値を先頭に置くとプロンプトキャッシュの
-        // 安定プレフィックスが毎日壊れるため、可変部は必ず末尾に置く。
+        // The date is evaluated per run, so a session that stays alive past midnight is still
+        // right. Tool-supplied instructions go after the caller's prompt, and the date goes last
+        // of all: a value that changes daily at the front would invalidate the cached stable
+        // prefix every day, so everything mutable is kept at the end.
         let groundedPrompt = SystemPrompt(
             components: (systemPrompt?.components ?? [])
                 + tools.systemInstructions.map { .context($0) }
                 + [.context(Self.todayContext())],
             metadata: systemPrompt?.metadata
         )
-        // レンダリング済みプロンプトを側帯で観測させる（デバッグ画面での最終プロンプト表示用）。
+        // Report the assembled prompt once per run, so a debug view can show what was actually sent.
         await telemetry?(.systemPrompt(rendered: groundedPrompt.render()))
         for _ in 0..<maxSteps {
             try Task.checkCancellation()
 
-            // ステップをストリーミング実行し、テキスト/思考デルタを到着順に転送する。
-            // ストリーミング未対応プロバイダはデフォルト実装が .completed のみを返す。
+            // Stream the step, forwarding text and thinking deltas as they arrive.
+            // A provider without streaming falls back to a default that yields only .completed.
             var stepResponse: LLMResponse?
             var streamedText = false
             for try await streamEvent in client.streamAgentStep(
@@ -191,11 +224,11 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                     stepResponse = response
                 }
             }
-            // completed なしの終端（プロバイダ実装の異常系）は空レスポンスとして扱う
+            // A stream that ends without .completed is a broken provider; treat it as empty.
             let response = stepResponse ?? LLMResponse(content: [], model: "", usage: .zero, stopReason: nil)
 
-            // usage はコスト計測（metrics）として telemetry へ。意味論イベント（Event）には混ぜない。
-            // ACP の usage_update への射影は ACP 境界（HostACPAgent）でこの telemetry から行う。
+            // Usage is a metric, not something the agent "did", so it goes to telemetry and never
+            // into Event. The ACP usage_update is projected from this sink at the ACP boundary.
             await telemetry?(.usage(response.usage, model: response.model))
 
             var toolUses: [(id: String, name: String, input: Data)] = []
@@ -208,8 +241,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 }
             }
 
-            // 非ストリーミングプロバイダの合成デルタ: デルタが一度も流れなかったステップは
-            // 全文を 1 デルタとして emit し、消費側の契約（テキストはデルタで届く）を保つ。
+            // Synthetic delta for non-streaming providers: a step that never emitted one sends its
+            // whole text as a single delta, keeping the promise that text always arrives as deltas.
             if !streamedText, !text.isEmpty {
                 try await onEvent(.textDelta(text))
             }
@@ -222,17 +255,16 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
 
             messages.append(.toolUses(toolUses.map { (id: $0.id, name: $0.name, input: $0.input) }))
 
-            // 対話ツールは実行せず中断し、入力要求として返す（A2A input-required へ写像）。
+            // An interactive tool is never executed: the loop stops and reports the question.
             if let ask = toolUses.first(where: { tools.tool(named: $0.name) is any InteractiveRuntimeTool }),
                let interactive = tools.tool(named: ask.name) as? any InteractiveRuntimeTool {
                 try await onEvent(.inputRequired(question: interactive.question(from: ask.input)))
                 return messages
             }
 
-            // 承認必須ツールを含むバッチは実行せず中断し、承認要求として返す
-            // （AG-UI interrupts / human-in-the-loop approvals へ写像）。
-            // 同バッチの承認不要ツールも実行しない — 部分実行状態を作らず、
-            // 再開時(resume pre-step)にまとめて解決する。
+            // A batch containing an approval-requiring tool stops whole, before anything runs.
+            // The tools in it that need no approval are held back too: that avoids a
+            // half-executed batch, and the resume pre-step settles all of them together.
             var approvals: [(id: String, name: String, input: Data, request: ToolApprovalRequest)] = []
             for use in toolUses {
                 if let tool = tools.tool(named: use.name) as? any ApprovalRequiringTool,
@@ -256,11 +288,13 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
                 try await onEvent(.toolCall(id: use.id, name: use.name, input: use.input))
             }
 
-            // 複数ツールは子タスクで並列実行し、結果を呼び出し順に整列する。
+            // Several tools run concurrently — one child task each, no cap — and the results are
+            // put back into call order before they reach the model.
             let executed: [ToolResult]
             if parallelToolExecution, toolUses.count > 1 {
                 let tools = self.tools
-                // TranscriptAwareTool には実行時点のメッセージ列を渡す（値渡し = 読み取り専用コピー）
+                // Every child gets the same by-value snapshot of the messages, so concurrent
+                // transcript-aware tools cannot observe each other's writes.
                 let transcript = messages
                 executed = try await withThrowingTaskGroup(of: (Int, ToolResult).self) { group in
                     for (index, use) in toolUses.enumerated() {
@@ -298,8 +332,8 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
             }
             messages.append(.toolResults(results))
 
-            // ターン終了ツール（ADK skip_summarization 相当）: 成功結果はモデルへ返す追加推論を
-            // 行わずターンを終える。エラー結果は通常どおり次ステップでモデルが自己修正できる。
+            // A turn-ending tool that succeeded finishes the turn without another model step, so
+            // the result is never summarised. A failed one falls through and the model retries.
             let turnEnded = zip(toolUses, executed).contains { use, result in
                 !result.isError && tools.tool(named: use.name) is any TurnEndingTool
             }
@@ -312,8 +346,11 @@ public struct AgentLoop<Client: AgentCapableClient>: Sendable where Client.Model
         return messages
     }
 
-    /// `run(messages:onEvent:)` のストリーミングラッパー。イベントを `AsyncThrowingStream` で返す。
-    /// ストリームのキャンセルは内部 Task に伝播し、親タスクのキャンセルも継承する。
+    /// Runs the same loop, delivering events as a stream instead of a callback.
+    ///
+    /// The work happens in an unstructured task, so unlike `run(messages:onEvent:)` it does not
+    /// inherit the calling task's cancellation. Terminating the stream — breaking out of the
+    /// `for await`, or letting it deallocate — is what cancels the loop and its in-flight tools.
     public func events(
         messages: [LLMMessage],
         pendingToolDecisions: [String: ToolApprovalDecision] = [:]

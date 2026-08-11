@@ -12,7 +12,7 @@ func backgroundTestCard(_ name: String) -> AgentCard {
     )
 }
 
-/// テスト制御ゲート。worker は wait() で停止し、release() まで完了しない（決定論的）。
+/// Holds a worker at a known point until released, so "still running" needs no sleep to observe.
 actor TestGate {
     private var isOpen = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -23,8 +23,8 @@ actor TestGate {
     }
 }
 
-/// startWork（working を発行）→ gate で停止 → artifact「結果」→ complete。
-/// startWork を先に出すので returnImmediately は working スナップショットを即返せる。
+/// Reports working, blocks on the gate, then produces an artifact and completes.
+/// Reporting working first is what lets the non-blocking send return a snapshot immediately.
 struct GatedWorker: AgentExecutor {
     let gate: TestGate
     func execute(_ context: RequestContext, eventQueue: EventQueue) async throws {
@@ -34,14 +34,14 @@ struct GatedWorker: AgentExecutor {
         await updater.addArtifact([.text("結果")], name: "result")
         try await updater.complete()
     }
-    // 協調的キャンセル: canceled を発行する（A2A の標準的なワーカー挙動）。
+    // Cooperative cancellation: reports canceled, as a well-behaved worker should.
     func cancel(_ context: RequestContext, eventQueue: EventQueue) async throws {
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
         try await updater.cancel()
     }
 }
 
-/// startWork → 短い作業 → artifact「結果」→ complete。必ず自走完了する。
+/// Finishes on its own without ever being waited on — the instant-completion case.
 struct BriefWorker: AgentExecutor {
     func execute(_ context: RequestContext, eventQueue: EventQueue) async throws {
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
@@ -61,8 +61,8 @@ func pollUntilTerminal(_ registry: AgentConnectionRegistry, _ taskId: TaskID) as
     throw MockBGError.timedOut
 }
 
-/// バックグラウンド委譲（A2A returnImmediately + tasks/get ポーリング）のテスト。
-/// `.timeLimit` を保険に付け、万一ハングしても 1 分で失敗させる。
+/// Background delegation: start without waiting, then read the result back.
+/// Every case carries a time limit so a hang fails the run instead of stalling it.
 @Suite("Background delegation (returnImmediately + checkTask/listRunningTasks)")
 struct BackgroundDelegationTests {
 
@@ -78,7 +78,7 @@ struct BackgroundDelegationTests {
         #expect(final.state == .completed)
         #expect(final.text.contains("結果"))
 
-        // 完了後も追跡は保持され、checkTask は引き続き成果物を返す。
+        // Tracking survives completion, so the result is still fetchable afterwards.
         let recheck = try await registry.checkTask(taskId)
         #expect(recheck.text.contains("結果"))
     }
@@ -92,11 +92,11 @@ struct BackgroundDelegationTests {
         let handle = try await registry.delegateAsync(to: "researcher", text: "調べて")
         let taskId = try #require(handle.taskId)
 
-        // gate 解放前は確実に実行中（決定論的）。
+        // Still held at the gate, so it is definitely running — no timing assumption needed.
         let running = await registry.listRunningTasks()
         #expect(running.contains { $0.name == "researcher" && $0.taskId == taskId })
 
-        // 解放して完了させると一覧から消える。
+        // Releasing it lets it finish, and it drops out of the list.
         await gate.release()
         _ = try await pollUntilTerminal(registry, taskId)
         let after = await registry.listRunningTasks()
@@ -111,15 +111,15 @@ struct BackgroundDelegationTests {
 
         let handle = try await registry.delegateAsync(to: "researcher", text: "調べて")
         let taskId = try #require(handle.taskId)
-        // 実行中（gate 停止中）。
+        // Held at the gate, so it is running.
         #expect(await registry.listRunningTasks().contains { $0.taskId == taskId })
 
-        // セッション中断相当: cancelAll が背景タスクを終端化する。
+        // What ending a session does: cancelAll drives background tasks to a terminal state.
         await registry.cancelAll()
-        await gate.release() // 残った worker は後始末
+        await gate.release() // let the worker unwind
 
         let status = try await registry.checkTask(taskId)
-        #expect(status.state.isTerminal) // canceled で終端
+        #expect(status.state.isTerminal)
         #expect(await registry.listRunningTasks().isEmpty)
     }
 
@@ -144,7 +144,7 @@ struct BackgroundDelegationTests {
 
 enum MockBGError: Error { case timedOut }
 
-/// observer に流れた DelegationEvent を記録する計器。
+/// Captures what reached the delegation observer, including how many times.
 actor EventRecorder {
     private(set) var events: [DelegationEvent] = []
     func record(_ event: DelegationEvent) { events.append(event) }
@@ -178,7 +178,7 @@ struct BackgroundMonitorTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(done)
-        #expect(await recorder.sawProgress) // 最終 task を一度描画している
+        #expect(await recorder.sawProgress) // the final task was rendered once via the fallback
     }
 
     @Test("gated ワーカー: 背景監視が subscribe で完了まで追跡し observer に通知する", .timeLimit(.minutes(1)))
@@ -235,7 +235,7 @@ struct BackgroundMonitorTests {
             if await recorder.sawFinished(state: .completed) { break }
             try await Task.sleep(for: .milliseconds(10))
         }
-        // 追加の完了イベントが来ないことを確認（subscribe + push が同じ完了を二重発火しない）。
+        // Wait past the first completion to be sure no second one follows from another mechanism.
         try await Task.sleep(for: .milliseconds(120))
         #expect(await recorder.finishedCount(state: .completed) == 1)
     }

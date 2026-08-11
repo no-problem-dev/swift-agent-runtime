@@ -2,28 +2,30 @@ import A2ACore
 import A2AClientCore
 import LLMClient
 
-/// ホストがワーカーへ委譲する間に起きる**ライフサイクル**イベント。
+/// The life of one delegation, reported while it runs so a UI can show it live.
 ///
-/// 公式 Python デモではホスト UI が別経路のタスクイベントストリームから進捗を得る。Swift では
-/// `AgentConnectionRegistry` に observer を注入し、`send_message` の実行中に逐次流すことで、
-/// 上位 UI が委譲レーンのライブ表示をできるようにする（ツールの戻り値とは独立）。
-/// `id` は 1 回の `send` を一意に識別する委譲 ID。並列に走る同一エージェントへの委譲を
-/// UI 側で個別のレーンに相関させるために使う。コスト計測（usage）は意味論と混ぜず
-/// `DelegationUsageObserver`（metrics 側帯）へ分離する。
+/// This is independent of what the delegation tool returns to the model: the tool blocks until
+/// the worker finishes, whereas these arrive throughout. `id` identifies a single delegation, so
+/// two concurrent delegations to the same worker stay in separate lanes. Token usage is not here
+/// — it goes to the usage observer instead.
 public enum DelegationEvent: Sendable {
-    /// 委譲を開始した。
+    /// A worker was handed a task. `label` is the opening of the message, truncated for display.
     case started(id: String, agent: String, label: String)
-    /// ワーカーの A2A ストリームイベント（status/artifact/message）。レーンのライブ更新用。
+    /// A raw event from the worker. For a background delegation the same underlying progress can
+    /// arrive more than once, since subscribe, poll and push all forward what they see.
     case progress(id: String, agent: String, response: StreamResponse)
-    /// 委譲が終端まで完了した（集約テキストと終端状態）。
+    /// The worker reached a terminal state. Fires exactly once per delegation, whichever delivery
+    /// mechanism observed the end first. For a background task that never terminates, this can
+    /// still fire with a non-terminal state once the wait budget runs out.
     case finished(id: String, agent: String, text: String, state: TaskState?)
-    /// 委譲が失敗した。
+    /// The delegation threw before reaching a terminal state. The error is already stringified.
     case failed(id: String, agent: String, error: String)
 }
 
-/// 委譲ライフサイクルの観測クロージャ。`AgentConnectionRegistry` に注入する。
+/// Receives delegation lifecycle events. Injected when creating the registry.
 public typealias DelegationObserver = @Sendable (DelegationEvent) async -> Void
 
-/// ワーカーが消費したトークン使用量（artifact metadata 由来）の metrics 側帯シンク。
-/// 委譲ライフサイクルとは別経路で、コスト集計のみに使う。
+/// Receives what a worker spent, read from the artifact it produced. Separate from the lifecycle
+/// observer so cost accounting never has to be filtered out of the progress stream. Not
+/// deduplicated: the same usage can be reported again if several delivery mechanisms see it.
 public typealias DelegationUsageObserver = @Sendable (_ id: String, _ agent: String, _ usage: TokenUsage) async -> Void

@@ -9,8 +9,7 @@ import Testing
 
 private enum MockError: Error { case unused }
 
-/// 受け取った会話中の user メッセージ本文を全て連結して返すクライアント。
-/// マルチターンで履歴が引き継がれているかを観測するために使う。
+/// Answers with every user message it was given, making the carried-over history observable.
 private struct HistoryEchoClient: AgentCapableClient {
     typealias Model = String
 
@@ -43,11 +42,11 @@ struct MultiTurnTests {
         #expect(first == "alpha")
 
         let second = try await session.run("beta")
-        // 履歴が引き継がれていれば、2 ターン目は alpha と beta の両方を観測する
+        // With history carried over, the second turn sees both messages.
         #expect(second.contains("alpha"))
         #expect(second.contains("beta"))
 
-        // 履歴は user/assistant の 2 ターン分 = 4 メッセージ
+        // Two turns of user plus assistant.
         let history = await session.messages
         #expect(history.count == 4)
     }

@@ -11,7 +11,7 @@ import A2AInProcess
 
 private enum MockError: Error { case unused }
 
-/// ワーカー用: 固定テキストを返すだけ。
+/// Worker side: answers with fixed text and never calls a tool.
 private struct FixedReplyClient: AgentCapableClient {
     typealias Model = String
     let replyText: String
@@ -24,7 +24,7 @@ private struct FixedReplyClient: AgentCapableClient {
     func planToolCalls(messages: [LLMMessage], model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> ToolCallResponse { throw MockError.unused }
 }
 
-/// オーケストレータ用: まず send_message を呼び、tool 結果が来たら "FINAL: <結果>" を返す。
+/// Host side: delegates once, then prefixes the worker's answer so the two are distinguishable.
 private struct DelegatingMockClient: AgentCapableClient {
     typealias Model = String
     let targetAgent: String
@@ -81,10 +81,10 @@ struct AgentSessionTests {
         )
 
         let result = try await session.run("Find and summarize X")
-        // オーケストレータは researcher に委譲し、その応答を最終テキストへ取り込む
+        // The prefix proves the host composed its own answer around the worker's reply.
         #expect(result == "FINAL: research findings")
 
-        // 委譲によりワーカーのタスクが completed になっている（マルチターン継続用に state 保存）
+        // The worker's task reached a terminal state, so the connection is free to start a new one.
         let outcome = try await registry.send(to: "researcher", text: "ping")
         #expect(outcome.state == .completed)
     }

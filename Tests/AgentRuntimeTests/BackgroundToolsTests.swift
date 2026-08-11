@@ -5,7 +5,7 @@ import A2AServer
 import LLMTool
 @testable import AgentRuntime
 
-/// ホストツール delegate_async / check_task / list_running_tasks のテスト。
+/// The background delegation tools as the model sees them.
 @Suite("Background host tools (delegate_async / check_task / list_running_tasks)")
 struct BackgroundToolsTests {
 
@@ -29,12 +29,12 @@ struct BackgroundToolsTests {
         let handle = try await registry.delegateAsync(to: "researcher", text: "go")
         let taskId = try #require(handle.taskId)
 
-        // gate 解放前なので確実に実行中 → list_running_tasks に出る。
+        // Held at the gate, so it is definitely running and must appear in the list.
         let listTool = ListRunningTasksTool(registry: registry)
         let listResult = try await listTool.execute(with: Data("{}".utf8))
         #expect(listResult.stringValue.contains(taskId.rawValue))
 
-        // 解放して check_task をポーリングし、完了の成果物を得る。
+        // Release it and poll the check tool until the completed result comes back.
         await gate.release()
         let checkTool = CheckTaskTool(registry: registry)
         let args = Data("{\"task_id\":\"\(taskId.rawValue)\"}".utf8)
@@ -46,7 +46,7 @@ struct BackgroundToolsTests {
         }
         #expect(finalText.contains("結果"))
 
-        // 完了後は list_running_tasks に taskId が含まれない。
+        // Once finished it is no longer listed, though it is still tracked.
         let after = try await listTool.execute(with: Data("{}".utf8))
         #expect(after.stringValue.contains(taskId.rawValue) == false)
     }

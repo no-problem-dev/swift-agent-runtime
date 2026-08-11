@@ -11,7 +11,7 @@ import A2AInProcess
 
 private enum SoloMockError: Error { case unused }
 
-/// ホストへ渡された tools / systemPrompt を 1 度だけ捕捉する。
+/// Captures the tools and prompt the host actually assembled.
 private actor Capture {
     var toolNames: [String] = []
     var prompt: String = ""
@@ -21,7 +21,7 @@ private actor Capture {
     }
 }
 
-/// 受け取った tools / systemPrompt を捕捉し、即座に最終テキストを返すだけのホストクライアント。
+/// Records what it was given, then answers immediately so the turn ends after one step.
 private struct CapturingClient: AgentCapableClient {
     typealias Model = String
     let capture: Capture
@@ -67,7 +67,7 @@ struct HostSoloGuardTests {
     @Test("フリートが空のとき委譲ツールも delegator プロンプトも注入されない")
     func emptyFleetSuppressesDelegation() async throws {
         let capture = Capture()
-        let registry = AgentConnectionRegistry()  // 何も register しない
+        let registry = AgentConnectionRegistry()  // nothing registered
         let host = HostAgent(client: CapturingClient(capture: capture), model: "mock", registry: registry)
 
         _ = try await host.run("こんにちは")

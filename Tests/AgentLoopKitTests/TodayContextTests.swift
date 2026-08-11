@@ -5,7 +5,7 @@ import Foundation
 import Testing
 @testable import AgentLoopKit
 
-/// executeAgentStep が受け取った systemPrompt を記録する probe クライアント。
+/// Records the rendered system prompt each step was invoked with.
 private actor PromptRecorder {
     var prompts: [String?] = []
     func record(_ prompt: String?) { prompts.append(prompt) }
@@ -41,7 +41,8 @@ struct TodayContextTests {
         let prompt = try #require(await recorder.prompts.first ?? nil)
         let dateIndex = try #require(prompt.range(of: "Today's date is "))
         let roleIndex = try #require(prompt.range(of: "You are a researcher."))
-        // 日付は日次で変わる可変値なので、安定部（role・ツール指示）より後ろに置く
+        // The date changes daily, so it must sit behind the stable part or the prompt cache
+        // prefix would be invalidated every day.
         #expect(roleIndex.lowerBound < dateIndex.lowerBound)
     }
 

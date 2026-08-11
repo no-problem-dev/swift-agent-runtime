@@ -3,14 +3,18 @@ import ACPCore
 import LLMClient
 import Foundation
 
-/// ユーザープロンプトのマルチモーダルコンテンツ（テキスト + 画像）を `LLMMessage` まで貫通させる変換層。
+/// Converts a user prompt's attachments into a message the model can actually see.
 ///
-/// ACP `ContentBlock` / A2A `Part` の画像（base64 data + mimeType / bytes + mediaType）を LLM の
-/// `MessageContent.image` に、PDF/テキスト添付（ACP `.resource` の blob/text）を `MessageContent.document`
-/// に射影する。テキストのみの入力は従来どおり `.user(text)` と同一の出力を返す（回帰防止）。
-/// 非対応の画像 mimeType / リソースは黙って捨てず `unsupportedImageMediaType` / `unsupportedResource` を throw する。
+/// Images from either protocol become image content, and PDF or text attachments become document
+/// content. A text-only prompt produces exactly the message a plain string would have, so adding
+/// this layer changed nothing for existing callers.
+///
+/// Anything that cannot be carried through throws instead of being dropped — an unusable
+/// attachment must not turn into a prompt that silently omits it. Audio and unrecognised block
+/// kinds are the exception: they are skipped without error.
 enum MultimodalInput {
 
+    /// Maps a MIME type to the model's image type, throwing for anything the model cannot read.
     static func imageMediaType(for mimeType: String) throws -> ImageMediaType {
         switch mimeType.lowercased() {
         case "image/jpeg": return .jpeg
@@ -21,14 +25,17 @@ enum MultimodalInput {
         }
     }
 
-    /// uri（file:// やパス文字列）から末尾コンポーネントをタイトルとして取り出す。
+    /// Takes the filename off a URI to label a document. `nil` when there is nothing to show.
     private static func title(fromURI uri: String) -> String? {
         let trimmed = URL(string: uri)?.lastPathComponent ?? (uri as NSString).lastPathComponent
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    /// ACP プロンプト（`[ContentBlock]`）→ ユーザー `LLMMessage`。
-    /// 画像は base64 をデコードして `.image` に、テキストは `.text` に射影する。
+    /// Builds a user message from an ACP prompt.
+    ///
+    /// Text blocks are joined with no separator, matching what the ACP path did before
+    /// attachments existed. Audio and unknown blocks are skipped silently; everything else that
+    /// cannot be carried throws.
     static func userMessage(from blocks: [ContentBlock]) throws -> LLMMessage {
         var contents: [LLMMessage.MessageContent] = []
         for block in blocks {
@@ -51,9 +58,10 @@ enum MultimodalInput {
         return collapse(contents, textSeparator: "")
     }
 
-    /// ACP `EmbeddedResource` → `MessageContent.document`。
-    /// text リソース（抽出済みテキスト）は plainText document、blob リソース（生バイト）は
-    /// mimeType "application/pdf" のみ pdf document に射影する。それ以外は throw（silent drop しない）。
+    /// Turns an embedded resource into document content.
+    ///
+    /// Text resources are already extracted and pass through as plain text. Raw bytes are only
+    /// accepted as PDF — any other binary type throws rather than reaching the model as garbage.
     private static func documentContent(from resource: EmbeddedResourceResource) throws -> LLMMessage.MessageContent {
         switch resource {
         case let .text(text):
@@ -77,14 +85,16 @@ enum MultimodalInput {
         }
     }
 
-    /// A2A `[Part]` → ユーザー `LLMMessage`。
-    /// テキストは逐語、構造化データ（`.data`）はパートごと JSON 化（既存 historyText と同等）、
-    /// 画像バイト（`.bytes` + image/* mediaType）は `.image` に射影する。
+    /// Builds a user message from A2A parts, joining text with newlines.
     static func userMessage(from parts: [Part]) throws -> LLMMessage {
         collapse(try contents(from: parts))
     }
 
-    /// `[Part]` を `[MessageContent]` へ。`role` を呼び出し側で決められるよう contents だけ返す。
+    /// Converts parts to message content without deciding a role.
+    ///
+    /// Text passes through verbatim and structured data is serialised to JSON per part. Byte
+    /// parts are only accepted as images; anything else throws. A data part that fails to encode
+    /// is dropped without error, so it reaches the model as an absence rather than a failure.
     static func contents(from parts: [Part]) throws -> [LLMMessage.MessageContent] {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
@@ -109,8 +119,8 @@ enum MultimodalInput {
         return contents
     }
 
-    /// 画像を含まなければテキストを結合して `.user(text)` と同一出力に畳む（回帰防止）。
-    /// 画像が混在する場合のみ複合コンテンツの `LLMMessage` を構築する。
+    /// Folds text-only content back into the single-string form, byte for byte what a plain
+    /// string message produces. Only a prompt with real attachments becomes multi-part.
     private static func collapse(_ contents: [LLMMessage.MessageContent], textSeparator: String = "\n") -> LLMMessage {
         let hasMedia = contents.contains {
             if case .text = $0 { return false }

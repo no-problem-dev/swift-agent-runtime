@@ -5,13 +5,13 @@ import Foundation
 import Testing
 @testable import AgentLoopKit
 
-/// executeAgentStep の呼び出し回数を数えるカウンタ。
+/// Counts model steps, which is how "the turn ended without another step" is asserted.
 private actor StepCounter {
     var count = 0
     func increment() -> Int { count += 1; return count }
 }
 
-/// 1 回目はターン終了ツールを呼び、2 回目以降はテキストを返す scripted クライアント。
+/// Calls the turn-ending tool on the first step, then answers with fixed text.
 private struct ToolThenTextClient: AgentCapableClient {
     typealias Model = String
     let counter: StepCounter
@@ -34,7 +34,7 @@ private struct ToolThenTextClient: AgentCapableClient {
     func planToolCalls(messages: [LLMMessage], model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> ToolCallResponse { fatalError("unused") }
 }
 
-/// 成功またはエラーを返すターン終了ツール（ADK skip_summarization 相当の検証用）。
+/// A turn-ending tool that can be made to succeed or fail, to test both branches.
 private struct MockTurnEndingTool: TurnEndingTool {
     let fails: Bool
     var toolName: String { "send_ui" }

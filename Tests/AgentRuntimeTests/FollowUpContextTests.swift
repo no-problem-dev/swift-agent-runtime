@@ -16,7 +16,7 @@ private actor CallCount {
     func increment() { value += 1 }
 }
 
-/// 委譲されたら実行回数を数え、固定レポートを返すワーカー。
+/// Counts how many times the worker was actually driven, which is the point of the assertion.
 private struct CountingWorkerClient: AgentCapableClient {
     typealias Model = String
     let reply: String
@@ -31,7 +31,7 @@ private struct CountingWorkerClient: AgentCapableClient {
     func planToolCalls(messages: [LLMMessage], model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> ToolCallResponse { throw MockError.unused }
 }
 
-/// 会話にツール結果が無ければ委譲し、あればそれを文脈から答える（状況ツール無し）。
+/// Delegates only when the conversation holds no tool result yet; otherwise answers from context.
 private struct FollowUpClient: AgentCapableClient {
     typealias Model = String
     func executeAgentStep(messages: [LLMMessage], model: String, systemPrompt: SystemPrompt?, tools: ToolSet, toolChoice: ToolChoice?, responseSchema: JSONSchema?, thinkingMode: ThinkingMode, reasoningEffort: ReasoningEffort?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> LLMResponse {
@@ -84,15 +84,15 @@ struct FollowUpContextTests {
         )
         let session = HostAgent(client: FollowUpClient(), model: "mock", registry: registry)
 
-        // ターン1: 委譲が起きる
+        // Turn one delegates.
         let first = try await session.run("SwiftUIを調べて")
         #expect(first.contains("宣言的"))
 
-        // ターン2: フォローアップ。文脈に調査結果が残っているので再委譲しない
+        // Turn two is a follow-up: the earlier result is still in the history.
         let second = try await session.run("さっき何を調べたんだっけ？")
         #expect(second.contains("宣言的"))
 
-        // ワーカーは 1 回しか呼ばれていない（ターン2 は文脈から回答）
+        // So the worker ran once, not twice — the second answer came from context.
         #expect(await counter.value == 1)
     }
 }

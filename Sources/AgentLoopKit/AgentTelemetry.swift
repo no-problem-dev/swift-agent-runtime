@@ -1,20 +1,21 @@
 import LLMClient
 
-/// エージェント実行の**側帯**観測（意味論イベントではないもの）。
+/// Cost and debug observations from a run, kept out of the event stream.
 ///
-/// `AgentLoop.Event` は「エージェントが何をしているか」の意味論だけを持つ。コスト計測・
-/// デバッグ観測・検証制御はそこに混ぜず、この sink へ流す。消費側はこれを meter / probe 等の
-/// 専用シンクへ振り分け、UI 状態ロジックは意味論イベントだけを見ればよくなる。
+/// The loop's events describe what the agent is doing; these describe what it cost and what it
+/// was actually sent. Splitting them means UI state can be driven from events alone, and meters
+/// and debug views subscribe here without the two vocabularies growing into each other.
 public enum AgentTelemetry: Sendable {
-    /// ターン開始時に組み立てられた最終 system prompt（デバッグ観測）。
-    /// `AgentLoop` が run ごとに 1 回発火する。
+    /// The fully assembled system prompt for the turn, including anything the tools contributed
+    /// and the date line. Fires once per `run`, before the first model step.
     case systemPrompt(rendered: String)
-    /// LLM 1 ステップ分のトークン使用量（コスト計測）。
+    /// Tokens billed for one model step. Fires once per step — accumulate to get the turn total.
     case usage(TokenUsage, model: String)
-    /// 直前の出力が検証フックで無効と判定された（観測。`willRetry` が true なら是正再生成する）。
-    /// `AgentLoop` 自身は発火せず、検証フックを持つ `HostAgent` が流す。
+    /// The output failed the caller-supplied validator. `willRetry` says whether a corrective
+    /// prompt follows, so an observer can tell "about to be replaced" from "this is final".
+    /// Only a host with a validator emits this; the loop itself never does.
     case validationFailed(issues: [String], willRetry: Bool)
 }
 
-/// 側帯観測の注入シンク。`AgentLoop` / `HostAgent` の構築・実行時に注入する。
+/// Receives telemetry. Injected when constructing a loop or starting a host turn.
 public typealias AgentTelemetrySink = @Sendable (AgentTelemetry) async -> Void

@@ -1,14 +1,30 @@
 # ``AgentLoopKit``
 
-全エージェントに共通する LLM ステップ実行エンジン — ツール呼び出し・並列実行・ACP session/update 射影を担う自律ループ基盤。
+The turn loop on its own: call the model, run the tools it asks for, feed the results back, repeat.
 
 ## Overview
 
-`AgentLoopKit` はパッケージの最下層に位置する実行エンジン。LLM クライアント（`AgentCapableClient`）とツール群（`ToolSet`）を受け取り、LLM 推論 → ツール呼び出し → 結果フィードバックのサイクルを `maxSteps` 回まで回す。ループが終了すると最終テキストと全トランスクリプト（tool call / tool result を含む `[LLMMessage]`）を返す。
+Give ``AgentLoop`` a client, a model and a tool set, and it runs a whole turn. Each round it asks
+the model for a step, executes whatever tools the step requested, appends the results and asks
+again — until the model answers without calling a tool, a turn-ending tool succeeds, or the step
+budget runs out. It returns the full transcript, tool calls and results included, which is also
+what you pass back in to continue the conversation.
 
-上位の `AgentRuntime` モジュールは `HostAgent`・`LLMAgentExecutor`・`RouterHostAgent` でこの基盤ループを内部的に使う。A2A フリートへの委譲・会話管理・ACP ゲートウェイが必要な場合は `AgentRuntime` を import する。
+This module knows nothing about agent-to-agent delegation. If you need a host that hands work to
+workers, or a session boundary over ACP, use `AgentRuntime`, which builds on this loop.
 
-### 基本的な使い方
+Three things are worth knowing before you start:
+
+- **Text always arrives as deltas.** A provider that cannot stream still emits its whole step as a
+  single delta, so concatenating deltas never loses text. The text on `completed` repeats the same
+  content for history — render one or the other, not both.
+- **A failing tool does not throw.** The error is stringified into a failed tool result and fed
+  back so the model can recover. Only cancellation and client failures propagate.
+- **`run` and `events` differ on cancellation.** `run(messages:onEvent:)` executes on your task, so
+  cancelling it cancels the model step and every running tool. `events(messages:)` uses an
+  unstructured task and does *not* inherit your cancellation — ending the stream is what stops it.
+
+### Running a turn
 
 ```swift
 import AgentLoopKit
@@ -21,64 +37,92 @@ let loop = AgentLoop(
     maxSteps: 12
 )
 
-// ループを実行し、意味論イベントをコールバックで受け取る
-let transcript = try await loop.run(messages: [.user("Swift の最新動向は？")]) { event in
+var answer = ""
+let transcript = try await loop.run(messages: [.user("What changed in Swift recently?")]) { event in
     switch event {
-    case .thinking(let text):
-        print("💭 \(text)")
+    case .textDelta(let chunk):
+        answer += chunk
     case .toolCall(_, let name, _):
-        print("🔧 \(name)")
-    case .toolResult(let id, let name, let output, let isError):
-        print(isError ? "⚠️ \(name): \(output)" : "✅ \(name)")
-    case .inputRequired(let question):
-        print("❓ \(question)")
+        print("calling \(name)")
+    case .toolResult(_, let name, let output, let isError):
+        print(isError ? "\(name) failed: \(output)" : "\(name) ok")
     case .completed(let text):
-        print(text)
+        answer = text
+    case .thinkingDelta, .inputRequired, .toolApprovalRequired:
+        break
     }
 }
-// `transcript` をそのまま次ターンの `messages` に渡すと会話が継続する
 ```
 
-### ストリーミングで使う
+Pass `transcript` straight back as `messages` on the next turn and the model keeps everything it
+already did as context. Note that `completed` also fires with empty text when `maxSteps` is
+exhausted, so receiving it is not by itself proof the model finished the job.
 
-`events(messages:)` を使うと同じイベントを `AsyncThrowingStream` で受け取れる。複数ループを並行実行したい場合や、別 `Task` でキャンセル制御したい場合に適する。
+### Consuming events as a stream
+
+``AgentLoop/events(messages:pendingToolDecisions:)`` delivers the same events without a callback,
+which suits driving a view directly.
 
 ```swift
-import AgentLoopKit
-
-let loop = AgentLoop(client: myClient, model: myModel, tools: myTools)
-
 for try await event in loop.events(messages: history) {
-    switch event {
-    case .completed(let text): renderFinalResponse(text)
-    default: break
+    if case .completed(let text) = event { render(text) }
+}
+```
+
+The loop runs in its own task here, so it keeps going even if the surrounding task is cancelled.
+Break out of the loop, or let the stream deallocate, to stop it.
+
+### Pausing to ask the user
+
+A tool conforming to ``InteractiveRuntimeTool`` is never executed. When the model requests it, the
+loop stops and reports the question instead, so the tool body is a place to phrase a question, not
+to perform work.
+
+```swift
+let loop = AgentLoop(
+    client: myClient,
+    model: myModel,
+    tools: ToolSet { RequestUserInputTool() }
+)
+
+let suspended = try await loop.run(messages: [.user("Delete the old exports")]) { event in
+    if case .inputRequired(let question) = event { show(question) }
+}
+
+// Resume by continuing the same transcript with the user's reply.
+let finished = try await loop.run(messages: suspended + [.user("Yes, delete them")]) { _ in }
+```
+
+### Requiring approval before a tool runs
+
+``ApprovalRequiringTool`` suspends the turn *before* anything executes — including the tools in the
+same batch that need no approval, so a partly applied batch is not a state you can reach. Collect
+the verdicts, then call `run` again with the same transcript.
+
+```swift
+var pending: [String: ToolApprovalDecision] = [:]
+
+let suspended = try await loop.run(messages: [.user("Follow these three shops")]) { event in
+    if case .toolApprovalRequired(let id, _, _, let request) = event {
+        pending[id] = ask(request.summary, request.details) ? .approved : .denied
     }
 }
-```
 
-### ACP への射影
-
-ACP 統合が必要な場面では `updates(messages:)` を使う。`AgentLoop.Event` を ACP 標準語彙（`session/update`）に射影したストリームを直接返し、クライアントへそのまま流せる。
-
-```swift
-import AgentLoopKit
-
-let loop = AgentLoop(client: myClient, model: myModel, tools: myTools)
-
-for try await update in loop.updates(messages: history) {
-    try await acpClient.sessionUpdate(
-        SessionNotification(sessionId: sessionId, update: update)
-    )
+try await loop.run(messages: suspended, pendingToolDecisions: pending) { event in
+    // Approved calls execute without re-emitting toolCall; denied ones never run.
 }
 ```
 
-### テレメトリ（コスト計測・デバッグ観測）
+A denied call is answered with a synthetic *success* result telling the model not to retry.
+Reporting it as an error would read to the model as something worth attempting again.
 
-`AgentLoop.Event` は意味論イベントのみを保持する。トークン使用量・レンダリング済み system prompt などのコスト計測・デバッグ情報は `AgentTelemetrySink` で別経路に分離する。
+### Cost and debugging on a side channel
+
+``AgentTelemetry`` carries what the events deliberately leave out: tokens per step and the fully
+assembled system prompt. Keeping them apart is what lets UI state be driven from the event stream
+alone.
 
 ```swift
-import AgentLoopKit
-
 let accumulator = UsageAccumulator()
 
 let loop = AgentLoop(
@@ -86,56 +130,55 @@ let loop = AgentLoop(
     model: myModel,
     tools: myTools,
     telemetry: { event in
-        if case let .usage(usage, model) = event {
-            await accumulator.add(usage)
+        switch event {
+        case .usage(let usage, _):        await accumulator.add(usage)
+        case .systemPrompt(let rendered): logPrompt(rendered)
+        case .validationFailed:           break
         }
     }
 )
 
 _ = try await loop.run(messages: history) { _ in }
 let total = await accumulator.total
-print("Total tokens: \(total?.inputTokens ?? 0) in / \(total?.outputTokens ?? 0) out")
 ```
 
-### 対話ツール
+The sink fires from whichever task ran the step, which is why ``UsageAccumulator`` is an actor;
+summing into a plain variable would race.
 
-`InteractiveRuntimeTool` を実装したツールを `ToolSet` に追加すると、LLM がそのツールを呼んだ瞬間にループが中断し `.inputRequired` イベントが発火する。標準実装の `RequestUserInputTool` を使うと、LLM がユーザーへの質問内容を自由に記述できる。
+### Projecting onto ACP
+
+``AgentLoop/updates(messages:)`` converts the same turn into ACP `session/update` values, ready to
+forward to a client.
 
 ```swift
-import AgentLoopKit
-
-let loop = AgentLoop(
-    client: myClient,
-    model: myModel,
-    tools: ToolSet { RequestUserInputTool() },
-    maxSteps: 8
-)
-
-_ = try await loop.run(messages: [.user("ファイルを削除してください")]) { event in
-    if case .inputRequired(let question) = event {
-        // ループが中断し、LLM が生成した確認質問を受け取る
-        print("LLM asks: \(question)")
-    }
+for try await update in loop.updates(messages: history) {
+    try await acpClient.sessionUpdate(
+        SessionNotification(sessionId: sessionId, update: update)
+    )
 }
 ```
 
+Two gaps are worth knowing. Token usage is not projected — ACP's `usage_update` is produced from
+the telemetry sink instead. And ACP has no approval vocabulary, so an approval request appears as
+an ordinary message: a client driven only by these updates has no way to send a verdict back.
+
 ## Topics
 
-### エージェントループ
+### The loop
 
 - ``AgentLoop``
-
-### イベント
-
 - ``AgentEvent``
 
-### テレメトリ
+### Suspending a turn
+
+- ``InteractiveRuntimeTool``
+- ``RequestUserInputTool``
+- ``ApprovalRequiringTool``
+- ``ToolApprovalRequest``
+- ``ToolApprovalDecision``
+
+### Cost and diagnostics
 
 - ``AgentTelemetry``
 - ``AgentTelemetrySink``
 - ``UsageAccumulator``
-
-### 対話ツール
-
-- ``InteractiveRuntimeTool``
-- ``RequestUserInputTool``

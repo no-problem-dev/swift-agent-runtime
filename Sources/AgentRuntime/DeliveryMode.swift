@@ -2,13 +2,19 @@ import A2ACore
 import A2AClientCore
 import Foundation
 
-/// ワーカー応答の受け取り方（公式 a2a-python `ClientConfig` の streaming/polling/blocking に対応）。
+/// How a worker's reply is collected off the wire.
+///
+/// This picks the transport, not whether the caller waits: every mode is consumed to the end
+/// before a delegation returns. It changes what intermediate progress is visible, and how much
+/// the worker's server is asked to support.
 public enum DeliveryMode: String, Sendable, CaseIterable, Identifiable {
-    /// SSE ストリーミング（`message/stream`）。途中の status/artifact を逐次受信。
+    /// Server-sent events. Status and artifact updates arrive as they happen — the only mode that
+    /// shows real progress. Requires a worker that supports streaming.
     case streaming
-    /// ブロッキング（`message/send`、`return_immediately=false`）。終端まで待って 1 回返る。
+    /// One request, one reply, after the worker has finished. No intermediate progress.
     case blocking
-    /// 非ブロッキング（`return_immediately=true`）。即返し、`getTask` でポーリング。
+    /// The worker returns a task immediately and the state is re-read on an interval until it is
+    /// terminal. Progress arrives at the polling granularity; use it when streaming is unavailable.
     case polling
 
     public var id: String { rawValue }
@@ -22,8 +28,15 @@ public enum DeliveryMode: String, Sendable, CaseIterable, Identifiable {
 }
 
 extension A2AClient {
-    /// 配信モードに応じて `StreamResponse` を統一的に流す（消費側のコードはモード非依存）。
-    /// 公式 `base_client.send_message`（streaming/polling 切替）と同じ考え方。
+    /// Streams a worker's reply, presenting all three delivery modes as the same event sequence.
+    ///
+    /// The work runs in an unstructured task, so it does not inherit the caller's cancellation —
+    /// terminating the stream is what stops it, including an in-progress polling loop.
+    ///
+    /// - Parameters:
+    ///   - message: The message to send.
+    ///   - mode: Which transport to use.
+    ///   - pollInterval: Gap between task re-reads. Used only by `.polling`.
     public func events(
         _ message: Message,
         mode: DeliveryMode,

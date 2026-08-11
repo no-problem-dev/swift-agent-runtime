@@ -1,16 +1,19 @@
 import Foundation
 
-/// AgentRuntime が発するエラー。`AgentConnectionRegistry`・`HostAgent`・`RouterHostAgent` の操作で throw される。
+/// Failures raised by delegation, routing and prompt conversion.
 public enum AgentRuntimeError: Error, Sendable, Equatable, LocalizedError {
-    /// 指定した名前のエージェントが `AgentConnectionRegistry` に登録されていない。
+    /// No worker is registered under this name. Also raised for a task id with no owning worker.
     case unknownAgent(String)
-    /// ルーター型ホストで転送先を決定できなかった（transfer_to_agent 呼び出し欠落・引数不正）。
+    /// The router could not decide where to send a message: the model produced no transfer call,
+    /// or its arguments would not decode. Nothing was forwarded.
     case routingFailed(String)
-    /// LLM が受け付けない画像 mimeType（jpeg/png/gif/webp 以外）。silent drop しない。
+    /// An image the model cannot accept — anything other than JPEG, PNG, GIF or WebP.
+    /// Thrown rather than dropped, so a prompt never silently loses an attachment.
     case unsupportedImageMediaType(String)
-    /// 画像 base64 のデコードに失敗した。
+    /// The image's base64 payload would not decode.
     case invalidImageData
-    /// LLM へ貫通できないリソース（未対応 blob mimeType・resource_link・破損 base64 等）。silent drop しない。
+    /// An attachment that cannot be inlined into the prompt: an unsupported blob type, a link to
+    /// a resource rather than its contents, or corrupt base64. Thrown rather than dropped.
     case unsupportedResource(String)
 
     public var errorDescription: String? {

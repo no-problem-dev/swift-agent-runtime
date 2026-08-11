@@ -5,7 +5,15 @@ import LLMClient
 import LLMTool
 import LLMAgentStep
 
-/// `AgentLoop` を A2A の `AgentExecutor` として実行するワーカー（a2a-samples の agent_executor 相当）。
+/// Wraps a single LLM agent as an A2A worker, driving the task lifecycle for it.
+///
+/// The turn is reported as it goes: working while the model runs, a status update naming each
+/// tool it calls, an artifact carrying the final text, and then completion. A turn that throws is
+/// reported as a failed task rather than propagated, so the error reaches the caller as text and
+/// this method still returns normally.
+///
+/// A tool that needs approval dead-ends here: the request is reported as a question to the user,
+/// but nothing on this path can carry a verdict back, so resending will ask again.
 public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where Client.Model: Sendable {
     private let client: Client
     private let model: Client.Model
@@ -15,26 +23,27 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
     private let artifactName: String
     private let maxTokens: Int?
     private let cachePolicy: PromptCachePolicy
-    /// ループが実際にレンダリングした system prompt（ツール同伴指示込み）の観測フック。
-    /// 計測（デバッグレコーダ等）向け。nil = 観測しない。
     private let onSystemPrompt: (@Sendable (String) async -> Void)?
-    /// LLM 会話履歴ストア。指定時はネイティブ transcript（tool call/result 込み）で
-    /// マルチターンを継続し、A2A タスク履歴からのテキスト復元を行わない。
     private let historyStore: (any AgentHistoryStore)?
 
-    /// `LLMAgentExecutor` を初期化する。
+    /// Creates a worker bound to one client, model and tool set.
     ///
     /// - Parameters:
-    ///   - client: LLM クライアント（`AgentCapableClient`）。
-    ///   - model: 使用モデル。
-    ///   - tools: 利用可能なツール群。デフォルトは空。
-    ///   - systemPrompt: システムプロンプト。`nil` の場合は日付コンテキストのみ前置する。
-    ///   - maxSteps: ループの最大ステップ数。デフォルト 12。
-    ///   - artifactName: A2A artifact 識別子。完了時に `addArtifact` へ渡す名前。デフォルト `"response"`。
-    ///   - maxTokens: LLM への最大出力トークン数。`nil` でモデルのデフォルト上限を使用する。
-    ///   - cachePolicy: system prompt + tools のプロンプトキャッシュ方針。デフォルト `.implicit`。
-    ///   - onSystemPrompt: ループが実際にレンダリングした system prompt（ツール同伴指示込み）の観測フック。デバッグ・計測向け。`nil` で観測なし。
-    ///   - historyStore: LLM 会話履歴ストア。指定するとネイティブ transcript（tool call/result 込み）でマルチターンを継続し、A2A タスク履歴からのテキスト復元を行わない。`nil` でタスク履歴から復元。
+    ///   - client: The LLM client every turn runs on.
+    ///   - model: The model identifier.
+    ///   - tools: Tools the model may call. Empty by default.
+    ///   - systemPrompt: Prepended to every step. When `nil`, only the date line is sent.
+    ///   - maxSteps: Step budget per turn. Exhausting it completes the task with empty text
+    ///     rather than failing it, so an empty artifact is not proof of an empty answer.
+    ///   - artifactName: The name given to the artifact carrying the final text.
+    ///   - maxTokens: Output token ceiling per step. `nil` uses the model's default.
+    ///   - cachePolicy: Prompt caching for the stable prefix.
+    ///   - onSystemPrompt: Receives the fully assembled prompt, tool-supplied instructions
+    ///     included, once per turn. For debugging. `nil` observes nothing.
+    ///   - historyStore: Where the conversation lives. With a store, follow-ups continue from the
+    ///     native transcript, tool calls and results intact. Without one, the conversation is
+    ///     rebuilt from the task history as flat text, which turns past tool calls into assistant
+    ///     prose and teaches the model to answer that way instead of calling tools.
     public init(
         client: Client,
         model: Client.Model,
@@ -63,8 +72,8 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
         try await updater.startWork()
 
-        // ワーカーが消費したトークンを集約し、完了時に artifact metadata で呼び出し元へ返す。
-        // usage（metrics）と systemPrompt（debug）は意味論イベントと別の telemetry 側帯で受ける。
+        // Tokens are summed across the turn and attached to the final artifact, which is how the
+        // caller learns what this worker cost — A2A has no event for it.
         let usage = UsageAccumulator()
         let onSystemPrompt = self.onSystemPrompt
         let loop = AgentLoop(
@@ -86,8 +95,9 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
 
         let messages = try await makeMessages(from: context)
         do {
-            // 進行中ステップのテキストデルタ蓄積。ツール呼び出し時に 1 回で掲示する
-            // （チャンクごとの status 更新は A2A ではノイズになるため）。
+            // Deltas are buffered and posted as one status update when a tool call comes along:
+            // a status update per chunk is noise on the A2A wire. Bounded by the step's own text,
+            // and discarded if the turn ends without a tool call.
             var stepText = ""
             let transcript = try await loop.run(messages: messages) { event in
                 switch event {
@@ -102,7 +112,8 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
                 case .toolResult, .thinkingDelta:
                     break
                 case .toolApprovalRequired(_, _, _, let request):
-                    // A2A の input-required へ写像(承認可否をテキストで尋ねる)
+                    // Reported as a question to the user, since A2A has no approval vocabulary.
+                    // The answer comes back as plain text, which cannot resume the held tool call.
                     try await updater.requiresInput(message: updater.makeAgentMessage([.text(request.summary)]))
                 case .inputRequired(let question):
                     try await updater.requiresInput(message: updater.makeAgentMessage([.text(question)]))
@@ -125,7 +136,8 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         try await updater.cancel()
     }
 
-    /// historyStore があればネイティブ履歴 + 新規入力、なければ A2A タスク履歴からの復元。
+    /// Assembles the conversation: the stored native history when there is a store, otherwise a
+    /// text-only reconstruction from the task history.
     private func makeMessages(from context: RequestContext) async throws -> [LLMMessage] {
         if let historyStore {
             let history = await historyStore.history(for: context.contextId.rawValue)
@@ -134,13 +146,16 @@ public struct LLMAgentExecutor<Client: AgentCapableClient>: AgentExecutor where 
         return try reconstructMessages(from: context)
     }
 
-    /// 新規ユーザー入力の `[Part]` を、画像を貫通させて `LLMMessage` 化する。
+    /// Converts the incoming parts into a user message, carrying attachments through.
+    /// An empty request becomes an empty message rather than an error.
     private func userMessage(from context: RequestContext) throws -> LLMMessage {
         guard let parts = context.message?.parts, !parts.isEmpty else { return .user("") }
         return try MultimodalInput.userMessage(from: parts)
     }
 
-    // resume（同一タスクへの再送）で文脈を引き継ぐため、A2A タスク履歴を LLM 会話へ復元する。
+    // Fallback used when no history store is configured: rebuild the conversation from the task
+    // history so a resend keeps its context. Everything becomes flat text — past tool calls and
+    // their results are lost, and attachments in earlier turns do not survive.
     private func reconstructMessages(from context: RequestContext) throws -> [LLMMessage] {
         var messages: [LLMMessage] = []
         for historical in context.currentTask?.history ?? [] {

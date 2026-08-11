@@ -7,8 +7,7 @@ import Testing
 
 private enum MockError: Error { case unused }
 
-/// streamAgentStep を実装した scripted クライアント。
-/// 1 ステップ目: テキストデルタ 2 つ + toolUse、2 ステップ目: テキストデルタ 1 つで完了。
+/// A streaming client: step one emits two deltas plus a tool call, step two one delta and ends.
 private struct StreamingScriptedClient: AgentCapableClient {
     typealias Model = String
 
@@ -43,7 +42,7 @@ private struct StreamingScriptedClient: AgentCapableClient {
     func planToolCalls(messages: [LLMMessage], model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> ToolCallResponse { throw MockError.unused }
 }
 
-/// 非ストリーミング（executeAgentStep のみ実装 = デフォルトの streamAgentStep）クライアント。
+/// Implements only the non-streaming entry point, so the protocol's default streaming is used.
 private struct NonStreamingClient: AgentCapableClient {
     typealias Model = String
 
@@ -56,7 +55,7 @@ private struct NonStreamingClient: AgentCapableClient {
     func planToolCalls(messages: [LLMMessage], model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> ToolCallResponse { throw MockError.unused }
 }
 
-/// streamAgentStep が受け取った thinkingMode を記録する probe クライアント。
+/// Records the thinking mode each step was invoked with.
 private actor ThinkingModeRecorder {
     var modes: [ThinkingMode] = []
     func record(_ mode: ThinkingMode) { modes.append(mode) }
@@ -107,12 +106,12 @@ struct StreamingEventTests {
             default: break
             }
         }
-        // ステップ 1 のデルタ 2 つ + ステップ 2 のデルタ 1 つ。全文の重複 emit なし
+        // Two deltas from step one, one from step two — no synthesised whole-text duplicate.
         #expect(deltas == ["確認", "します", "完了"])
         #expect(sawToolCall)
         #expect(completedText == "完了")
 
-        // デルタ → toolCall → 次ステップのデルタ → completed の順序
+        // Ordering: delta, then toolCall, then the next step's delta, then completed.
         let firstDeltaIndex = try #require(events.firstIndex { if case .textDelta = $0 { true } else { false } })
         let toolCallIndex = try #require(events.firstIndex { if case .toolCall = $0 { true } else { false } })
         let lastDeltaIndex = try #require(events.lastIndex { if case .textDelta = $0 { true } else { false } })

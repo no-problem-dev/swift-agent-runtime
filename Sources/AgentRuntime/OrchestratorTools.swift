@@ -3,8 +3,8 @@ import LLMClient
 import LLMTool
 import Foundation
 
-/// 委譲先リモートエージェントを列挙するツール（a2a-samples `list_remote_agents` 相当）。
-/// root instruction が `list_remote_agents` を名指しするため、ツール名はそれに一致させる。
+/// Lets the model read the roster of workers it can delegate to.
+/// The host prompt names this tool literally, so renaming it breaks the prompt.
 struct ListRemoteAgentsTool: Tool {
     private let registry: AgentConnectionRegistry
 
@@ -27,8 +27,12 @@ struct ListRemoteAgentsTool: Tool {
     }
 }
 
-/// リモートエージェントへメッセージを送って行動させ、応答を得るツール（a2a-samples `send_message` 相当）。
-/// 引数は公式と同じく `agent_name` / `message`。
+/// Delegates to one worker and blocks until it finishes.
+///
+/// A worker that failed or was cancelled comes back as an error result, and one waiting on input
+/// comes back as ordinary text telling the model to ask the user — so the loop continues either
+/// way and the model gets a chance to react. Only a transport failure throws.
+/// The host prompt names this tool literally.
 struct SendMessageTool: Tool {
     private let registry: AgentConnectionRegistry
 
@@ -79,9 +83,11 @@ struct SendMessageTool: Tool {
     }
 }
 
-/// リモートエージェントへ**非ブロッキング**で委譲し、完了を待たず即 task_id を返すツール
-/// （A2A `returnImmediately`）。複数エージェントを並列に走らせ、後から `check_task` /
-/// `list_running_tasks` で進捗・成果物を確認するバックグラウンドエージェント運用の起点。
+/// Starts a worker without waiting, returning a task id the model can follow up on.
+///
+/// This is how the model fans work out to several workers at once. The worker keeps running after
+/// the host's turn ends, so the model may answer the user immediately and let completion arrive
+/// later. A worker that finishes instantly returns its answer inline with no task id at all.
 struct DelegateAsyncTool: Tool {
     private let registry: AgentConnectionRegistry
 
@@ -116,7 +122,7 @@ struct DelegateAsyncTool: Tool {
         let arguments = try JSONDecoder().decode(Arguments.self, from: argumentsData)
         let handle = try await registry.delegateAsync(to: arguments.agent_name, text: arguments.message)
         guard let taskId = handle.taskId else {
-            // ワーカーがタスクを作らず Message を即返した（同期完了）。
+            // The worker answered outright without opening a task; there is nothing to poll.
             return .text(handle.immediateText.isEmpty
                 ? "Agent \(handle.name) responded immediately with no text."
                 : handle.immediateText)
@@ -128,7 +134,10 @@ struct DelegateAsyncTool: Tool {
     }
 }
 
-/// 委譲済みタスクの現在状態と成果物を `task_id` で取得するツール（A2A `tasks/get`）。
+/// Reads a background task's state and result on demand.
+///
+/// Read-only and repeatable. A task still running comes back as text telling the model to check
+/// again later, so a poll loop costs a model step each time it goes round.
 struct CheckTaskTool: Tool {
     private let registry: AgentConnectionRegistry
 
@@ -169,7 +178,8 @@ struct CheckTaskTool: Tool {
     }
 }
 
-/// 進行中（未完了）の委譲タスクを列挙するツール（A2A `tasks/get` で各タスクを refresh）。
+/// Lists the background tasks still in flight, re-reading each one.
+/// Completed tasks are absent — their results are fetched by task id instead.
 struct ListRunningTasksTool: Tool {
     private let registry: AgentConnectionRegistry
 

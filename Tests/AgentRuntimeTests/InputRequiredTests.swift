@@ -4,8 +4,7 @@ import A2AServer
 import A2AInProcess
 @testable import AgentRuntime
 
-/// 手書きワーカー（langgraph サンプル同型）: 初回ターンは input-required で中断、
-/// 同一タスクへの再送（resume）で completed にする。
+/// Asks a question on the first turn, then completes when the same task is sent to again.
 private struct PausingExecutor: AgentExecutor {
     func execute(_ context: RequestContext, eventQueue: EventQueue) async throws {
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
@@ -38,12 +37,12 @@ struct InputRequiredTests {
         let (card, handler) = makePausingWorker()
         await registry.register(card: card, handler: handler)
 
-        // 初回ターン → 中断（input-required）、質問テキストが返る
+        // First turn stops on a question, and the question text comes back with it.
         let first = try await registry.send(to: "weather", text: "weather please")
         #expect(first.state == .inputRequired)
         #expect(first.text.contains("Which city?"))
 
-        // ユーザー回答を同ワーカーへ再送 → 同一 task が resume して completed
+        // Sending the answer resumes the same task rather than opening a new one.
         let second = try await registry.send(to: "weather", text: "Tokyo")
         #expect(second.state == .completed)
         #expect(second.text.contains("Weather for Tokyo"))

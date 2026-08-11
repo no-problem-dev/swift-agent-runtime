@@ -14,7 +14,8 @@ private enum MockError: Error { case unused }
 
 // MARK: - Workers (in-process)
 
-/// startWork → working → artifact「結果」→ complete（モード差を観測できる速度）。
+/// Emits an intermediate working update between start and finish, slowly enough that a delivery
+/// mode which shows progress can be told apart from one that does not.
 private struct SlowExecutor: AgentExecutor {
     func execute(_ context: RequestContext, eventQueue: EventQueue) async throws {
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
@@ -33,7 +34,7 @@ private actor Counter {
     func increment() { value += 1 }
 }
 
-/// 受け取ったユーザー入力をそのままレポートにエコーするワーカー（呼び出し回数を数える）。
+/// Echoes its input back and counts invocations, so each delegation is individually identifiable.
 private struct EchoExecutor: AgentExecutor {
     let counter: Counter
     func execute(_ context: RequestContext, eventQueue: EventQueue) async throws {
@@ -57,7 +58,7 @@ private func makeWorker(_ executor: any AgentExecutor) -> A2AClient {
 
 // MARK: - Orchestrator (deterministic fake LLM)
 
-/// 1 ターンで research を観点の数だけ並列に呼び、結果が揃ったら統合する決定論的オーケストレータ。
+/// Requests one research call per perspective in a single step, then merges the results.
 private struct ParallelOrchestratorClient: AgentCapableClient {
     typealias Model = String
     let perspectives: [String]
@@ -89,7 +90,7 @@ private struct ParallelOrchestratorClient: AgentCapableClient {
     func planToolCalls(messages: [LLMMessage], model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> ToolCallResponse { throw MockError.unused }
 }
 
-/// `delegate` でワーカーに 1 観点を委譲し、レポートを返すツール。
+/// A tool whose body is a blocking delegation, which is how a tool call becomes a sub-agent call.
 private struct DelegateResearchTool: Tool {
     let client: A2AClient
     let mode: DeliveryMode
@@ -129,9 +130,9 @@ struct DelegationTests {
             }
         }
 
-        #expect(result.text == "結果")              // artifact を集約
-        #expect(result.finalState == .completed)     // 終端まで消費（ブロッキング）
-        #expect(await states.list.contains(.working)) // 待機中の進捗を tap できた
+        #expect(result.text == "結果")              // artifacts aggregated
+        #expect(result.finalState == .completed)     // consumed to the end before returning
+        #expect(await states.list.contains(.working)) // progress was visible while blocked
     }
 
     @Test("blocking 委譲: 終端の結果だけを集約して返す")
@@ -159,7 +160,7 @@ struct DelegationTests {
             if case .completed(let text) = event { final = text }
         }
 
-        #expect(await counter.value == 3)   // 観点ごとに独立した委譲が走った
+        #expect(await counter.value == 3)   // one independent delegation per perspective
         #expect(final.contains("基礎"))
         #expect(final.contains("応用"))
         #expect(final.contains("課題"))

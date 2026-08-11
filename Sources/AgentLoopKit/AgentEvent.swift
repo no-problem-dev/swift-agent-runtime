@@ -3,28 +3,32 @@ import Foundation
 import LLMClient
 import LLMAgentStep
 
-/// `AgentLoop.Event`（意味論イベント）の Client 非依存な射影。
+/// The loop's events without the client type — use this to store or pass them across a boundary.
 ///
-/// `AgentLoop` はクライアント型でジェネリックなため、その `Event` は型引数なしに
-/// 名前を呼べない。これはホスト／アプリが消費するための非ジェネリックなミラーで、
-/// `Event` と同一モジュールに置く — 追従漏れは runtime のビルドで検知される。
-/// 側帯観測（usage/systemPrompt 等）は `AgentTelemetry`（非ジェネリック）を直接使う。
+/// `AgentLoop` is generic over its client, so its nested `Event` cannot be named without also
+/// naming a client type. This mirror can. It lives in the same module as the original because the
+/// conversion below switches exhaustively: a case added there stops compiling here.
+/// Token usage and rendered prompts are not mirrored — those are already client-independent.
 public enum AgentEvent: Sendable {
-    /// アシスタントテキストの増分。表示はデルタを正とし、`completed` の `text` は
-    /// ターン終端の確定値として扱う。
+    /// The next chunk of assistant text. Render from these; the text on `completed` repeats the
+    /// same content for history, so displaying both duplicates it.
     case textDelta(String)
-    /// 思考テキストの増分（thinking 有効時のみ）。
+    /// The next chunk of reasoning text. Only arrives when thinking is enabled.
     case thinkingDelta(String)
+    /// A tool the model asked to run. `input` is the raw JSON arguments, unparsed.
     case toolCall(id: String, name: String, input: Data)
+    /// A finished tool call. `isError` is fed back to the model to recover from, not thrown.
     case toolResult(id: String, name: String, output: String, isError: Bool)
-    /// 承認必須ツールの呼び出し(ループは実行せずに中断している)。
+    /// A tool needing approval was requested; the loop stopped without running any of that batch.
     case toolApprovalRequired(id: String, name: String, input: Data, request: ToolApprovalRequest)
+    /// The agent asked the user a question and stopped.
     case inputRequired(question: String)
+    /// The turn ended. Also emitted with empty text when the step budget ran out.
     case completed(text: String)
 }
 
 extension AgentEvent {
-    /// ジェネリックな `AgentLoop<C>.Event` を非ジェネリックな `AgentEvent` へ型消去する。
+    /// Erases the client type from a loop event.
     public init<C: AgentCapableClient>(_ event: AgentLoop<C>.Event) where C.Model: Sendable {
         switch event {
         case .textDelta(let delta): self = .textDelta(delta)

@@ -3,12 +3,17 @@ import A2AClientCore
 import LLMClient
 import Foundation
 
-/// ブロッキング委譲の集約結果（ワーカーのレポート本文＋終端状態＋トークン使用量）。
+/// What a worker produced, once its stream reached the end.
 public struct DelegationResult: Sendable {
+    /// The worker's artifacts and message replies, concatenated. Progress notes are not included.
     public let text: String
+    /// The task the worker opened, or `nil` if it answered with a bare message instead.
     public let taskId: String?
+    /// The state the task ended in. `nil` means there was no task. Reaching the end of the stream
+    /// is not the same as succeeding — check for `.completed` before trusting `text`.
     public let finalState: TaskState?
-    /// ワーカーが消費したトークン使用量（artifact metadata から取得。無ければ nil）。
+    /// What the worker spent, if it reported anything. `nil` when the worker sent no usage, or
+    /// when the metadata failed to decode.
     public let usage: TokenUsage?
 
     public init(text: String, taskId: String?, finalState: TaskState?, usage: TokenUsage? = nil) {
@@ -20,12 +25,18 @@ public struct DelegationResult: Sendable {
 }
 
 extension A2AClient {
-    /// 1 メッセージをワーカーへ送り、配信モードに沿ってストリームを**終端まで消費**してから返す
-    /// （a2a-samples `HostAgent.send_message` 相当のブロッキング委譲）。
+    /// Sends one message to a worker and waits for its stream to end.
     ///
-    /// 待っている間の各 `StreamResponse` を `onEvent` に流すので、UI は進捗をライブ表示できる（SSE の本来の用途）。
-    /// 呼び出しごとに新しい `messageId`（`taskId` 無し）で送るため、**同一ワーカーへの並列委譲も独立タスク**になる。
-    /// artifact と Message 応答のテキストを集約して返す（status メッセージは進捗ノートなので含めない）。
+    /// Every event is handed to `onEvent` while the call is still blocked, which is how a UI shows
+    /// progress without giving up the simple return value. Each call sends a fresh message with no
+    /// task id, so two concurrent calls to the same worker get independent tasks and cannot
+    /// interfere. Status messages are treated as progress notes and left out of the result text.
+    ///
+    /// - Parameters:
+    ///   - text: The instruction for the worker.
+    ///   - mode: How the reply is collected. All three modes block until the end either way.
+    ///   - onEvent: Called for each event as it arrives, before this method returns.
+    /// - Returns: The worker's artifacts and messages, its terminal state, and its usage.
     public func delegate(
         _ text: String,
         mode: DeliveryMode,

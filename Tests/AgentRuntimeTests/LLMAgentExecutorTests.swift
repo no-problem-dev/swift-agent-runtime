@@ -9,12 +9,11 @@ import A2AServer
 import A2AInProcess
 @testable import AgentRuntime
 
-// MARK: - スクリプト化したモック LLM クライアント
+// MARK: - Scripted mock LLM client
 
 private enum MockError: Error { case unused }
 
-/// `executeAgentStep` で固定のテキスト応答（endTurn）を返すだけのモック。
-/// `runAgentText` はツール呼び出しが無いため即 `.finalText` に到達する。
+/// Answers with fixed text and never calls a tool, so a turn is exactly one step.
 private struct MockClient: AgentCapableClient {
     typealias Model = String
     let replyText: String
@@ -39,7 +38,7 @@ private struct MockClient: AgentCapableClient {
         )
     }
 
-    // 以降は runAgentText では未使用のため throw スタブ。
+    // Unused on this path; throwing makes an unexpected call fail loudly rather than pass.
     func generateWithUsage<T: StructuredProtocol>(
         input: LLMInput, model: String, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?
     ) async throws -> GenerationResult<T> { throw MockError.unused }

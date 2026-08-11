@@ -15,7 +15,8 @@ struct MultimodalInputTests {
     private let pdfBytes = Data([0x25, 0x50, 0x44, 0x46]) // "%PDF"
     private var pdfBase64: String { pdfBytes.base64EncodedString() }
 
-    /// テキストのみメッセージが `.user(String)` と同形（contents == [.text]）であることを確認しつつ本文を返す。
+    /// Returns the text only if the message has the single-content shape a plain string produces,
+    /// so an accidental multi-part message fails the assertion rather than passing on text alone.
     private func soleText(of message: LLMMessage) -> String? {
         guard message.contents.count == 1, case let .text(value) = message.contents.first else { return nil }
         return value
@@ -54,7 +55,7 @@ struct MultimodalInputTests {
             .text(TextContent(text: "world")),
         ]
         let message = try MultimodalInput.userMessage(from: blocks)
-        // 旧 HostACPAgent は区切りなしで join していた。
+        // The ACP path joined text with no separator before attachments existed; keep that.
         #expect(message.images.isEmpty)
         #expect(soleText(of: message) == "hello world")
     }
@@ -75,7 +76,7 @@ struct MultimodalInputTests {
         }
     }
 
-    // MARK: - mimeType マッピング
+    // MARK: - MIME type mapping
 
     @Test("mimeType → ImageMediaType: jpeg/png/gif/webp")
     func mediaTypeMapping() throws {
@@ -119,7 +120,7 @@ struct MultimodalInputTests {
         }
     }
 
-    // MARK: - ACP resource（PDF / テキスト添付）→ document
+    // MARK: - ACP resources (PDF and text attachments) become documents
 
     @Test("ACP: PDF blob リソース → document(.pdf, base64) が含まれる")
     func acpPdfBlobResource() throws {

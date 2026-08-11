@@ -4,7 +4,7 @@ import A2AServer
 import A2AInProcess
 @testable import AgentRuntime
 
-/// startWork → working → 少し待って → artifact → complete（モード差を観測できる速度）。
+/// Emits an intermediate working update, slowly enough that the delivery modes differ observably.
 private struct SlowExecutor: AgentExecutor {
     func execute(_ context: RequestContext, eventQueue: EventQueue) async throws {
         let updater = TaskUpdater(eventQueue: eventQueue, taskId: context.taskId, contextId: context.contextId)
@@ -63,7 +63,7 @@ struct DeliveryModeTests {
         for try await event in client.events(userMessage("go"), mode: .polling, pollInterval: .milliseconds(15)) {
             if case .task(let t) = event { states.append(t.status.state) }
         }
-        #expect(!(states.first?.isTerminal ?? true))   // 最初は非終端
-        #expect(states.last == .completed)              // 最後は完了
+        #expect(!(states.first?.isTerminal ?? true))   // returns before the work is done
+        #expect(states.last == .completed)              // and still reaches completion
     }
 }

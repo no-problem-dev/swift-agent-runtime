@@ -1,11 +1,11 @@
 import LLMClient
 
-/// telemetry sink（@Sendable）越しに usage を集計するためのスレッドセーフな蓄積器。
-/// ワーカーが自分の総消費量を artifact metadata で呼び出し元へ返す等に使う。
+/// Sums the per-step usage arriving on a telemetry sink into a turn total.
 ///
-/// `AgentTelemetry` が「何を観測させるか」の定義であるのに対し、こちらはその**消費側**。
-/// 変更理由が違うのでファイルを分けている。
+/// The sink is `@Sendable` and fires from whatever task ran the step, so accumulating in a plain
+/// variable races. A worker uses this to report what it spent back to its caller.
 public actor UsageAccumulator {
+    /// The running total, or `nil` until the first step reports usage.
     public private(set) var total: TokenUsage?
     public init() {}
     public func add(_ usage: TokenUsage) { total = total?.adding(usage) ?? usage }

@@ -9,7 +9,7 @@ import A2AInProcess
 
 private enum MockError: Error { case unused }
 
-/// 固定テキストを返すワーカー用クライアント。
+/// Leaf worker: answers with fixed text and never delegates further.
 private struct FixedReplyClient: AgentCapableClient {
     typealias Model = String
     let replyText: String
@@ -22,7 +22,7 @@ private struct FixedReplyClient: AgentCapableClient {
     func planToolCalls(messages: [LLMMessage], model: String, tools: ToolSet, toolChoice: ToolChoice?, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> ToolCallResponse { throw MockError.unused }
 }
 
-/// 指定ワーカーへ委譲し、結果に "FINAL: " を付けて返すオーケストレータ用クライアント。
+/// Delegates once and prefixes the reply, so each nesting level leaves a visible mark.
 private struct DelegatingClient: AgentCapableClient {
     typealias Model = String
     let target: String
@@ -63,7 +63,7 @@ struct NestedOrchestrationTests {
 
     @Test("B → A → W: 中間オーケストレータ A を A2A ワーカーとして公開し、入れ子で委譲が通る")
     func nestedDelegation() async throws {
-        // 末端ワーカー W
+        // Leaf worker.
         let wCard = makeCard("w")
         let registryA = AgentConnectionRegistry()
         await registryA.register(card: wCard, handler: DefaultRequestHandler(
@@ -71,19 +71,19 @@ struct NestedOrchestrationTests {
             executor: LLMAgentExecutor(client: FixedReplyClient(replyText: "W output"), model: "mock")
         ))
 
-        // 中間オーケストレータ A（W へ委譲）を HostAgentExecutor で A2A 公開
+        // Middle orchestrator, exposed as a worker so the top one can delegate to it.
         let aCard = makeCard("a")
         let aExecutor = HostAgentExecutor {
             HostAgent(client: DelegatingClient(target: "w"), model: "mock", registry: registryA, maxSteps: 6)
         }
 
-        // 上位オーケストレータ B（A へ委譲）
+        // Top orchestrator.
         let registryB = AgentConnectionRegistry()
         await registryB.register(card: aCard, handler: DefaultRequestHandler(agentCard: aCard, executor: aExecutor))
         let sessionB = HostAgent(client: DelegatingClient(target: "a"), model: "mock", registry: registryB, maxSteps: 6)
 
         let result = try await sessionB.run("do it")
-        // B → A → W の二段委譲で "FINAL:" が 2 回付く
+        // Two prefixes means the request really passed through both levels.
         #expect(result == "FINAL: FINAL: W output")
     }
 

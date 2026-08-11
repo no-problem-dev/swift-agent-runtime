@@ -1,16 +1,15 @@
 import Foundation
 
-/// ホスト（オーケストレータ）の root instruction。
+/// The system prompt an orchestrator runs on.
 ///
-/// 基盤は Google a2a-samples `host_agent.py` の `root_instruction`。これに A2A 標準の
-/// 非同期タスクモデル（`returnImmediately` + `tasks/get`）に基づくバックグラウンド委譲の
-/// 語彙を加え、ホストが提供する全ツールを一貫して記述する。可変部は登録エージェント一覧
-/// `agents`（1 行 1 JSON）と現在エージェント `activeAgent`。
+/// Two variants, because a host with no workers is a different job from a host with some. The
+/// text describes every delegation tool the host offers, blocking and background alike, so the
+/// prompt and the tool set have to be changed together.
 enum HostInstruction {
-    /// ホストの system prompt 本文を返す。
+    /// The delegating prompt, used when at least one worker is registered.
     /// - Parameters:
-    ///   - agents: 登録エージェント（`{name, description}` を 1 行 1 JSON）。
-    ///   - activeAgent: 継続中の委譲先（なければ `"None"`）。
+    ///   - agents: The roster, one JSON object per line.
+    ///   - activeAgent: The worker mid-conversation, or `"None"`.
     static func root(agents: String, activeAgent: String) -> String {
         """
         You are an expert delegator that can delegate the user request to the
@@ -40,13 +39,12 @@ enum HostInstruction {
         """
     }
 
-    /// 委譲先（リモートエージェント）が 1 件も登録されていないときの単独実行用 instruction。
+    /// The plain prompt, used when no workers are registered.
     ///
-    /// `root` は「expert delegator」として `list_remote_agents` / `delegate_async` 等で
-    /// 他エージェントへ委譲する前提の本文だが、フリートが空（co-agent 0 件）の場合は
-    /// それらのツールも提供されない。委譲語彙を残すと、特に小型のオンデバイスモデルが
-    /// 存在しない委譲ツールを探して反射的に呼ぼうとし、ツール選択と出力品質が劣化する。
-    /// そのため空フリート時は委譲を一切示唆しない素の指示へ切り替える。
+    /// With an empty fleet the delegation tools are not injected either, and leaving the
+    /// delegation vocabulary in the prompt makes small on-device models reach for tools that do
+    /// not exist — which degrades their tool choice and their answers. So the wording drops every
+    /// mention of delegating.
     static func solo() -> String {
         """
         You are a capable assistant. Answer the user's request directly and concisely.

@@ -7,10 +7,10 @@ import Testing
 
 private enum MockError: Error { case unused }
 
-/// ツール呼び出し → 結果 → 最終テキストを順に返す scripted クライアント。
+/// Scripted client: optionally asks a question first, then answers with fixed text.
 private struct ScriptedClient: AgentCapableClient {
     typealias Model = String
-    /// true なら 1 回目に request_user_input（対話ツール）を呼ぶ。
+    /// When true, the first step calls the interactive tool instead of answering.
     let askUser: Bool
 
     func executeAgentStep(messages: [LLMMessage], model: String, systemPrompt: SystemPrompt?, tools: ToolSet, toolChoice: ToolChoice?, responseSchema: JSONSchema?, thinkingMode: ThinkingMode, reasoningEffort: ReasoningEffort?, maxTokens: Int?, cachePolicy: PromptCachePolicy) async throws -> LLMResponse {

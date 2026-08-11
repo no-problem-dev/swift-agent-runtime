@@ -5,7 +5,7 @@ import Foundation
 import Testing
 @testable import AgentLoopKit
 
-/// executeAgentStep が受け取った cachePolicy を記録する probe クライアント。
+/// Records the cache policy each step was invoked with.
 private actor PolicyRecorder {
     var policies: [PromptCachePolicy] = []
     func record(_ policy: PromptCachePolicy) { policies.append(policy) }

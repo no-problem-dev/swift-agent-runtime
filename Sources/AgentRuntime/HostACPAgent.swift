@@ -6,26 +6,30 @@ import AgentLoopKit
 import LLMClient
 import Foundation
 
-/// `HostACPAgent` が発するエラー。
+/// Failures raised at the ACP boundary.
 public enum HostACPAgentError: Error, Sendable {
-    /// `prompt` / `cancel` 等の操作で、指定した `SessionId` に対応するセッションが見つからなかった。
+    /// No session exists for this id. Sessions live in memory only, so this is what a client sees
+    /// after a restart if it kept an id across it.
     case unknownSession(SessionId)
-    /// 対応していない ACP 拡張メソッド（`ext`）が呼ばれた。
+    /// An ACP extension method this agent does not implement.
     case unsupported(String)
 }
 
 public extension StopReason {
-    /// 非標準（runtime 拡張）: ホストがユーザー入力を要求してターンを中断した。
-    /// クライアントは入力 UI を出し、回答を次の `prompt` として送り直す。
+    /// Non-standard: the turn stopped because the agent needs an answer from the user.
+    /// Show an input prompt and send the reply as the next turn.
     static let inputRequired = StopReason("input_required")
 }
 
-/// `HostAgent`（内部で A2A ワーカーを回すオーケストレータ）を **ACP エージェント**として露出する。
+/// Exposes an orchestrator over ACP, so an app can drive it as a client.
 ///
-/// app↔host の縦境界を ACP で実現する: アプリは ACP クライアント（`prompt` で駆動）、これは ACP
-/// エージェント（`session/update` をストリーム）。ワーカー委譲は host 内部で A2A のまま（横）。
-/// セッションごとに `HostAgent` を保持し、会話を分離・継続する。意味論イベントだけを
-/// `session/update` に射影し、usage/systemPrompt 等の telemetry は別 sink で受ける（ACP 語彙外）。
+/// This is the vertical boundary — app to host — while delegation to workers stays horizontal and
+/// A2A inside the host. One orchestrator is kept per session so conversations stay separate.
+///
+/// Only the semantic events reach the client as updates; usage is projected separately as its ACP
+/// counterpart, and the rendered prompt is never sent. Conversation history is written to a file
+/// under the session's working directory after every turn, which is what makes reloading a
+/// session resume it.
 public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Model: Sendable {
     private let client: any ACPClient
     private let makeHost: @Sendable () -> HostAgent<Client>
@@ -37,12 +41,14 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
     }
     private var sessions: [SessionId: Session] = [:]
 
-    /// `HostACPAgent` を初期化する。
+    /// Creates an ACP agent that builds one orchestrator per session.
     ///
     /// - Parameters:
-    ///   - client: ACP クライアント。`session/update` の送信（ストリーム射影・usage 通知）に使用する。
-    ///   - telemetry: usage / system prompt 等の観測フック。`nil` で観測なし。
-    ///   - makeHost: `HostAgent` のファクトリ。`@escaping @Sendable` クロージャで、`newSession` と `loadSession` のたびに呼ばれてセッション単位で独立したインスタンスを生成する。
+    ///   - client: Where updates are sent. A client that blocks here stalls the turn.
+    ///   - telemetry: Also receives usage and the rendered prompt. Usage reaches the ACP client
+    ///     regardless; this is the extra sink for meters and debug views. `nil` observes nothing.
+    ///   - makeHost: Called once per new or loaded session. Each call must return a fresh
+    ///     orchestrator — returning a shared one merges the conversations.
     public init(
         client: any ACPClient,
         telemetry: AgentTelemetrySink? = nil,
@@ -56,9 +62,9 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
     // MARK: - Negotiation
 
     public func initialize(_ request: InitializeRequest) async throws -> InitializeResponse {
-        // 実装しているメソッドに合わせて capabilities を申告する（過少・過大申告を避ける）。
-        // session list/delete/resume/close は実装済み。prompt は text + image を消費する
-        // （image は base64 を LLMMessage.image へ射影）。audio/embeddedContext は未対応。
+        // Declared to match what is actually implemented, so a client is neither denied something
+        // that works nor promised something that does not. Prompts accept text and images; audio
+        // is skipped.
         InitializeResponse(
             protocolVersion: .v1,
             agentCapabilities: AgentCapabilities(
@@ -81,8 +87,9 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
     // MARK: - Session lifecycle
 
     public func newSession(_ request: NewSessionRequest) async throws -> NewSessionResponse {
-        // SessionId は cwd（per-session ディレクトリ）の名前から**決定的に**導出する。
-        // → 永続アイデンティティと一致し、`session/load` で同じ id を復元できる。
+        // The id is derived from the working directory's name so that it matches the identity on
+        // disk and a reload gets the same id back. Two directories with the same last component
+        // therefore collide, and the second session replaces the first.
         let id = Self.sessionId(forCwd: request.cwd)
         try? FileManager.default.createDirectory(at: URL(fileURLWithPath: request.cwd), withIntermediateDirectories: true)
         sessions[id] = Session(host: makeHost(), cwd: request.cwd)
@@ -94,7 +101,9 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
         return SessionId(name.isEmpty ? UUID().uuidString : name)
     }
 
-    // 会話履歴を per-session SSOT（cwd/conversation.json）に永続化し、session/load で復元する。
+    // The conversation is stored per session under its working directory. Both directions fail
+    // quietly: a write that fails is not reported, and a missing or unreadable file loads as an
+    // empty conversation, so a reload can silently start over instead of resuming.
     nonisolated private static func conversationURL(cwd: String) -> URL {
         URL(fileURLWithPath: cwd).appendingPathComponent("conversation.json")
     }
@@ -110,7 +119,7 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
     }
 
     public func loadSession(_ request: LoadSessionRequest) async throws -> LoadSessionResponse {
-        // SSOT の会話履歴（cwd/conversation.json）を seed → 復元セッションでも会話を継続できる。
+        // Seed the new orchestrator from the stored conversation so the reloaded session continues.
         let host = makeHost()
         await host.loadHistory(Self.loadConversation(cwd: request.cwd))
         sessions[request.sessionId] = Session(host: host, cwd: request.cwd)
@@ -145,22 +154,29 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
 
     // MARK: - Prompt turn
 
+    /// Runs one turn and streams it to the client as updates.
+    ///
+    /// Cancellation is reported as a stop reason rather than thrown, and the partial conversation
+    /// is still persisted. Any other failure propagates after the updates already sent.
+    ///
+    /// - Throws: `HostACPAgentError.unknownSession` for an id that was never created or loaded,
+    ///   or a conversion failure for an attachment the model cannot accept.
     public func prompt(_ request: PromptRequest) async throws -> PromptResponse {
         guard let session = sessions[request.sessionId] else {
             throw HostACPAgentError.unknownSession(request.sessionId)
         }
-        // 画像コンテンツ（base64 + mimeType）を平坦化せず LLMMessage まで貫通させる。
-        // テキストのみの入力は従来の `.user(text)` と同一出力になる（回帰なし）。
+        // Attachments are carried through to the model rather than flattened away. An attachment
+        // the model cannot accept throws here, before the turn starts.
         let userMessage = try MultimodalInput.userMessage(from: request.prompt)
 
         let sessionId = request.sessionId
         let client = self.client
         let baseTelemetry = self.telemetry
-        // ACP 境界での usage 射影。usage は意味論イベントではなく metrics（telemetry）だが、
-        // その ACP 対応物 `usage_update` は session/update の標準語彙。ここで telemetry から
-        // 射影してクライアントに流すことで、`AgentLoop.Event`（意味論専用）を汚さずに
-        // ACP のライブゲージを成立させる。種別内訳は ACP 語彙外のため used/size のみ載せ、
-        // 内訳は baseTelemetry（meter）側で扱う。
+        // Usage is a metric, but its ACP counterpart is part of the standard update vocabulary, so
+        // it is projected here rather than being mixed into the event stream. ACP has no field for
+        // the breakdown by token kind, so only the total is sent; anything finer belongs on the
+        // telemetry sink. Failures sending it are ignored — a dropped gauge update must not kill
+        // the turn.
         let telemetry: AgentTelemetrySink = { event in
             if case let .usage(usage, _) = event {
                 let used = UInt64(max(0, usage.inputTokens + usage.outputTokens))
@@ -171,8 +187,8 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
             }
             await baseTelemetry?(event)
         }
-        // inputRequired と completed はどちらも agentMessageChunk に射影されるため、
-        // 「ホストがユーザー入力を要求してターンを中断した」かは StopReason で区別する。
+        // A question and a finished answer both project onto the same kind of update, so the stop
+        // reason is the only thing that tells a client the turn is waiting on the user.
         var stopReason = StopReason.endTurn
         do {
             for try await event in await session.host.stream(userMessage, telemetry: telemetry) {
@@ -183,7 +199,7 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
         } catch is CancellationError {
             stopReason = .cancelled
         }
-        // ターン後、会話履歴を per-session SSOT（cwd/conversation.json）へ永続化する（resume の基盤）。
+        // Persist after every turn, cancelled ones included, so a reload resumes from here.
         Self.persistConversation(await session.host.messages, cwd: session.cwd)
         return PromptResponse(stopReason: stopReason)
     }
@@ -201,6 +217,6 @@ public actor HostACPAgent<Client: AgentCapableClient>: ACPAgent where Client.Mod
     }
 
     public func extNotification(_ notification: ExtNotification) async throws {
-        // 非対応の拡張通知は無視する。
+        // No extension notifications are handled; ignoring them is the contract for notifications.
     }
 }

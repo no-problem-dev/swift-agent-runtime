@@ -9,7 +9,7 @@ import A2AServer
 import A2AInProcess
 @testable import AgentRuntime
 
-// 共通のモック（LLMAgentExecutorTests と同じ方針: 固定テキストを返す）
+// Shared mock, same approach as the executor tests: always answers with fixed text.
 private enum MockError: Error { case unused }
 
 private struct FixedReplyClient: AgentCapableClient {

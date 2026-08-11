@@ -5,48 +5,56 @@ import LLMTool
 import LLMAgentStep
 import Foundation
 
-/// オーケストレータ（ホスト）エージェント（a2a-samples `HostAgent` 相当）。
+/// An agent whose job is to hand work to other agents and compose their answers.
 ///
-/// ホスト自身が `AgentLoop` で動く LLM エージェントで、`list_remote_agents` / `send_message` で
-/// 登録済みワーカーへ委譲する。system prompt は `HostInstruction.root`（公式 root_instruction の逐語移植）に
-/// レジストリのロスターと現在エージェントを注入して組み立てる。委譲の reasoning 部分は一切カスタムせず、
-/// アプリ固有の出力フォーマット指示だけを `outputInstruction` として後置する。
-/// `run` / `stream` を跨いでホストの会話履歴を保持する。
+/// The host is itself a model in a tool loop; its tools are the delegation tools, and its prompt
+/// is assembled from the registry's roster. Registering no workers turns delegation off entirely
+/// — both the tools and the delegating wording disappear — so an empty fleet degrades into a
+/// plain assistant rather than a confused delegator.
+///
+/// Conversation history is kept across every `run` and `stream` on the same instance, including
+/// the tool calls and their results, so a follow-up can be answered from context without
+/// delegating again. Call `clear()` to start over.
+///
+/// The actor serialises turns, but nothing rejects a second concurrent turn — it will queue and
+/// then extend the same history. Only one turn at a time is cancellable.
 public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable {
     private let client: Client
     private let model: Client.Model
     private let registry: AgentConnectionRegistry
     private let extraTools: ToolSet
-    /// 出力フォーマット等のアプリ固有指示。delegation 本文の後ろに別セクションとして付く（本文は不変）。
     private let outputInstruction: String?
     private let maxSteps: Int
     private let maxTokens: Int?
-    /// 最終出力の検証フック。空配列＝有効、非空＝問題点（人間可読）を返す。`nil` なら検証しない（従来挙動）。
-    /// A2UI 等のドメイン固有検証はここに注入することで、runtime をドメイン非依存に保つ。
     private let outputValidator: (@Sendable (String) -> [String])?
-    /// 検証失敗時に LLM へ送る是正再プロンプトの組み立て。`(問題点, 元入力) -> 再プロンプト文`。
     private let correctivePrompt: (@Sendable (_ issues: [String], _ originalInput: String) -> String)?
-    /// 検証失敗時の最大リトライ回数（初回生成は含まない。例: 1 なら計2試行）。
     private let maxValidationRetries: Int
-    /// 安定プレフィックス（system prompt + tools）のキャッシュ方針。ループの全ステップに適用される。
     private let cachePolicy: PromptCachePolicy
     private var history: [LLMMessage] = []
     private var currentRun: Task<String, Error>?
 
-    /// `HostAgent` を初期化する。
+    /// Creates a host bound to one client, model and worker registry.
     ///
     /// - Parameters:
-    ///   - client: LLM クライアント（`AgentCapableClient`）。
-    ///   - model: 使用モデル。
-    ///   - registry: ワーカー接続を管理するレジストリ。ワーカーが空の場合は委譲ツールを注入しない。
-    ///   - outputInstruction: 出力フォーマット等のアプリ固有指示。delegation 本文の後ろに別セクションとして付加する。`nil` で省略。
-    ///   - extraTools: 委譲ツール以外の追加ツール。デフォルトは空。
-    ///   - maxSteps: ホストループの最大ステップ数。デフォルト 12。
-    ///   - maxTokens: LLM への最大出力トークン数。`nil` でモデルのデフォルト上限を使用する。
-    ///   - outputValidator: 最終出力の検証フック。空配列を返せば有効、非空なら問題点（人間可読）を返す。`nil` で検証なし（デフォルト）。
-    ///   - correctivePrompt: 検証失敗時に LLM へ送る是正再プロンプトの組み立て関数。`nil` でデフォルト実装（問題点 + 元入力を列挙した英文）を使用する。
-    ///   - maxValidationRetries: 検証失敗時の最大リトライ回数。初回生成を含まない（`0` で計1試行、`1` で計2試行）。デフォルト 0。
-    ///   - cachePolicy: system prompt + tools の安定プレフィックスのキャッシュ方針。全ステップに適用される。
+    ///   - client: The LLM client the host itself runs on.
+    ///   - model: The model identifier for the host's own reasoning.
+    ///   - registry: The workers this host may delegate to. Read fresh on every turn, so workers
+    ///     registered later become available without rebuilding the host. An empty registry
+    ///     suppresses both the delegation tools and the delegating prompt.
+    ///   - outputInstruction: Appended after the delegation prompt as its own section, for output
+    ///     format rules. The delegation wording itself is never altered.
+    ///   - extraTools: Tools beyond delegation. Merged with the delegation tools, so a name
+    ///     colliding with one of those is a problem to avoid.
+    ///   - maxSteps: Step budget for one turn. Exhausting it returns empty text, not an error.
+    ///   - maxTokens: Output token ceiling per step. `nil` uses the model's default.
+    ///   - outputValidator: Inspects the final text and returns the problems with it, or an empty
+    ///     array if it is fine. Keeps domain rules out of the runtime. `nil` skips validation.
+    ///   - correctivePrompt: Builds the retry prompt from the problems and the original request.
+    ///     `nil` uses a generic English one.
+    ///   - maxValidationRetries: Retries after a failed validation, excluding the first attempt —
+    ///     `0` means one attempt total. Each retry is a full extra turn, billed as such. When the
+    ///     retries run out the invalid text is returned anyway.
+    ///   - cachePolicy: Prompt caching for the stable prefix. Applied to every step.
     public init(
         client: Client,
         model: Client.Model,
@@ -73,30 +81,37 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         self.cachePolicy = cachePolicy
     }
 
-    /// 現在の会話履歴（tool call / tool result を含む全トランスクリプト）。
+    /// The whole conversation so far, tool calls and results included. Persist this to resume the
+    /// host later; it grows with every turn and nothing trims it.
     public var messages: [LLMMessage] { history }
 
-    /// 会話履歴をリセットする。次の `run` / `stream` は新規セッションとして開始する。
+    /// Forgets the conversation. The next turn starts fresh.
     public func clear() {
         history.removeAll()
     }
 
-    /// 復元（`session/load`）時に会話履歴を seed する。以後の run/stream はこの文脈を継続する。
+    /// Replaces the conversation wholesale, to resume a persisted session.
+    /// Call before the first turn — doing it mid-conversation discards what has happened.
     public func loadHistory(_ messages: [LLMMessage]) {
         history = messages
     }
 
-    /// テキスト入力を受け取り、最終 assistant 応答を返す（`LLMMessage` 版の便宜オーバーロード）。
+    /// Runs one turn from a text prompt and returns the final answer.
     public func run(_ userInput: String) async throws -> String {
         try await run(.user(userInput))
     }
 
-    /// マルチモーダル入力（画像 + テキスト）を受ける run。テキストのみなら `.user(String)` と同一挙動。
+    /// Runs one turn from a prompt that may carry attachments.
+    ///
+    /// Cancelling the calling task cancels the turn and, through the structured tree, the workers
+    /// it delegated to. The history is only updated when the turn completes, so a cancelled turn
+    /// leaves the conversation as it was.
     public func run(_ userMessage: LLMMessage) async throws -> String {
         let task = Task { try await self.runInner(userMessage) }
         currentRun = task
         defer { currentRun = nil }
-        // 呼び出し元タスクのキャンセルを保持タスクへ橋渡しし、構造化キャンセルと cancel() を同経路にする。
+        // Bridge the caller's cancellation into the retained task, so cancelling from outside and
+        // calling cancel() take the same path.
         return try await withTaskCancellationHandler {
             try await task.value
         } onCancel: {
@@ -104,14 +119,19 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         }
     }
 
-    /// 進行中 run を止め（構造化ツリーで委譲先まで伝播）、ワーカーも A2A `cancelTask` で終端化する。
+    /// Stops the turn in progress and asks every worker to stop too.
+    ///
+    /// Cancels the running turn, which propagates down the structured tree, and separately
+    /// cancels each worker's task so background delegations that outlive the turn also stop.
+    /// Only reaches a turn started through `run`; a `stream` turn is stopped by ending its stream.
+    /// Safe to call when nothing is running.
     public func cancel() async {
         currentRun?.cancel()
         await registry.cancelAll()
     }
 
-    /// セッション終了処理。明示キャッシュをサーバー側リソースとして所有するクライアントなら解放する
-    /// （Gemini ではストレージ課金の停止）。それ以外のクライアントでは何もしない。
+    /// Releases server-side prompt caches held by the client, where the provider bills for them.
+    /// Does nothing for clients without that concept. Call when a session ends.
     public func close() async {
         if let releasing = client as? PromptCacheReleasing {
             await releasing.releasePromptCaches()
@@ -119,9 +139,9 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
     }
 
     private func runInner(_ userMessage: LLMMessage) async throws -> String {
-        // 全トランスクリプト（委譲のツール呼び出し・結果含む）を履歴として保持。
-        // → 次ターンで「さっき何を調べた？」等にツール無しで文脈から答えられる。
-        // 検証フックがあれば、無効出力を是正再プロンプトで再生成する（prompt→generate→validate）。
+        // The whole transcript becomes the history, delegation calls and their results included —
+        // that is what lets the next turn answer "what did you just find out" without delegating
+        // again. A validator, if present, drives regenerate-and-recheck rounds on top of that.
         let originalText = Self.text(of: userMessage)
         var input = userMessage
         var attempt = 0
@@ -139,19 +159,25 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         }
     }
 
-    /// テキスト入力をストリームで受け取る便宜オーバーロード（`LLMMessage` 版の糖衣）。
+    /// Runs one turn from a text prompt, delivering events as they happen.
     public func stream(_ userInput: String, telemetry: AgentTelemetrySink? = nil) -> AsyncThrowingStream<AgentLoop<Client>.Event, Error> {
         stream(.user(userInput), telemetry: telemetry)
     }
 
-    /// マルチモーダル入力（画像 + テキスト）を受ける stream。テキストのみなら `.user(String)` と同一挙動。
+    /// Runs one turn from a prompt that may carry attachments, delivering events as they happen.
+    ///
+    /// The turn runs in an unstructured task and is not tracked by `cancel()` — terminating the
+    /// stream is what stops it. With a validator configured, a rejected answer is regenerated,
+    /// which means a consumer can see two `completed` events in one turn; watch the telemetry
+    /// sink to tell "this is being replaced" from "this is final".
     public func stream(_ userMessage: LLMMessage, telemetry: AgentTelemetrySink? = nil) -> AsyncThrowingStream<AgentLoop<Client>.Event, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    // 検証フックがあれば、各生成後に検証し、無効なら是正再プロンプトを「新しいユーザーターン」
-                    // として送り直して再生成する（会話履歴は保持される）。検証失敗は `telemetry` の
-                    // `.validationFailed` で観測側へ流し、「再描画 or フォールバック」を判断できるようにする。
+                    // Each generation is validated, and a rejected one is retried by sending the
+                    // corrective prompt as a new user turn — so the failed attempt stays in the
+                    // history rather than being rewritten. Failures are reported on telemetry so
+                    // a consumer can decide between redrawing and falling back.
                     let originalText = Self.text(of: userMessage)
                     var input = userMessage
                     var attempt = 0
@@ -184,7 +210,8 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         }
     }
 
-    /// メッセージのテキスト部分を結合（是正再プロンプトの `originalInput` 用）。
+    /// Joins a message's text for the corrective prompt. Attachments are lost, so a retry sees
+    /// only the words of the original request.
     private static func text(of message: LLMMessage) -> String {
         message.contents.compactMap { content -> String? in
             if case let .text(value) = content { return value }
@@ -192,7 +219,8 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
         }.joined(separator: "\n")
     }
 
-    /// 是正再プロンプトの汎用フォールバック（ドメイン固有のタグ等が要る場合は init で `correctivePrompt` を注入）。
+    /// The generic retry prompt. Inject a corrective prompt at init when the domain needs one
+    /// that names its own format or tags.
     private static func defaultCorrectivePrompt(_ issues: [String], _ originalInput: String) -> String {
         "Your previous response was invalid: \(issues.joined(separator: "; ")). "
         + "Generate a corrected response that fixes these issues. "
@@ -204,10 +232,10 @@ public actor HostAgent<Client: AgentCapableClient> where Client.Model: Sendable 
     }
 
     private func makeLoop(telemetry: AgentTelemetrySink? = nil) async -> AgentLoop<Client> {
-        // 委譲先（リモートエージェント）が 1 件も登録されていなければ、委譲ツールも
-        // delegator プロンプトも注入しない（単独実行）。空フリートで委譲語彙を残すと、
-        // 特に小型オンデバイスモデルが存在しない委譲ツールを反射的に呼ぼうとして
-        // ツール選択・出力品質が劣化するため。
+        // With no workers registered, neither the delegation tools nor the delegating prompt are
+        // injected. Leaving the vocabulary in place makes small on-device models reach for tools
+        // that do not exist, degrading both their tool choice and their answers.
+        // The roster is read per turn, so a worker registered later is picked up here.
         let roster = await registry.rosterJSONLines()
         let active = await registry.activeAgent
         let hasAgents = !roster.isEmpty
