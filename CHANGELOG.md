@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The test suite compiles again. 0.18.0 was tagged with test mocks still declaring
+  swift-llm-client's pre-4.0.0 `generateWithUsage` signature; the library targets had been
+  migrated and the mocks had not, so `swift build --build-tests` failed with 47 errors on a fresh
+  clone. It was not caught because a stale `.build` directory predating the pin bump made
+  `swift test` report a pass.
+
+
 ## [0.18.0] - 2026-08-11
 
 ### Changed

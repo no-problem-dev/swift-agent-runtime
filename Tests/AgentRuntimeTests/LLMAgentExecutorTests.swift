@@ -40,11 +40,11 @@ private struct MockClient: AgentCapableClient {
 
     // Unused on this path; throwing makes an unexpected call fail loudly rather than pass.
     func generateWithUsage<T: StructuredProtocol>(
-        input: LLMInput, model: String, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?
+        input: LLMInput, model: String, options: GenerationOptions
     ) async throws -> GenerationResult<T> { throw MockError.unused }
 
     func generateWithUsage<T: StructuredProtocol>(
-        messages: [LLMMessage], model: String, systemPrompt: SystemPrompt?, temperature: Double?, maxTokens: Int?
+        messages: [LLMMessage], model: String, options: GenerationOptions
     ) async throws -> GenerationResult<T> { throw MockError.unused }
 
     func planToolCalls(
