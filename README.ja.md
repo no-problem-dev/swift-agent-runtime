@@ -66,7 +66,7 @@ AgentConnectionRegistry  →  Workers (LLMAgentExecutor)
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/no-problem-dev/swift-agent-runtime.git", .upToNextMinor(from: "0.17.0"))
+    .package(url: "https://github.com/no-problem-dev/swift-agent-runtime.git", .upToNextMinor(from: "0.18.0"))
 ]
 ```
 
