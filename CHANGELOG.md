@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-08-11
+
 ### Fixed
 
 - The test suite compiles again. 0.18.0 was tagged with test mocks still declaring
