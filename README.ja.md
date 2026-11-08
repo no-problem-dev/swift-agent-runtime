@@ -68,10 +68,10 @@ print(try await host.run("Research the latest trends in quantum computing."))
 
 ## ドキュメント
 
-[**AgentLoopKit**](https://no-problem-dev.github.io/swift-agent-runtime/documentation/agentloopkit/) —
+[**AgentLoopKit**](Sources/AgentLoopKit/Documentation.docc) —
 ループ本体、イベント、ツール、テレメトリ。
 
-[**AgentRuntime**](https://no-problem-dev.github.io/swift-agent-runtime/documentation/agentruntime/) —
+[**AgentRuntime**](Sources/AgentRuntime/Documentation.docc) —
 エージェント間の委譲、バックグラウンドタスク、ACP でのホスト公開。
 
 ## インストール
